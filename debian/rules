@@ -9,5 +9,14 @@
 # Uncomment this to turn on verbose mode.
 #export DH_VERBOSE=1
 
+# Select the PVE::InitSystem backend to build against (see src/Makefile's
+# PVE_INIT_SYSTEM variable) based on whether the pkg.pve-common.sysvinit
+# build profile is active, e.g. via `dpkg-buildpackage -Ppkg.pve-common.sysvinit`.
+ifneq (,$(filter pkg.pve-common.sysvinit,$(DEB_BUILD_PROFILES)))
+export PVE_INIT_SYSTEM = sysvinit
+else
+export PVE_INIT_SYSTEM = systemd
+endif
+
 %:
-	dh $@ 
+	dh $@

@@ -1,0 +1,14 @@
+package PVE::InitSystem::Backend;
+
+# Generated at build time by src/Makefile from Backend.pm.in - do not edit
+# the generated PVE/InitSystem/Backend.pm directly. See PVE::InitSystem for
+# how this is used, and the PVE_INIT_SYSTEM variable in src/Makefile for how
+# to select a different backend (e.g. from debian/rules, depending on which
+# Debian build profile is active).
+
+use strict;
+use warnings;
+
+our $MODULE = 'PVE::InitSystem::@INIT_SYSTEM_BACKEND@';
+
+1;
