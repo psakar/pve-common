@@ -11,7 +11,9 @@
 
 # Select the PVE::InitSystem backend to build against (see src/Makefile's
 # PVE_INIT_SYSTEM variable) based on whether the pkg.pve-common.sysvinit
-# build profile is active, e.g. via `dpkg-buildpackage -Ppkg.pve-common.sysvinit`.
+# build profile is active. This is primarily for Devuan and other
+# systemd-free Debian derivatives; to build this variant, run:
+#   dpkg-buildpackage -b -us -uc -Ppkg.pve-common.sysvinit
 ifneq (,$(filter pkg.pve-common.sysvinit,$(DEB_BUILD_PROFILES)))
 export PVE_INIT_SYSTEM = sysvinit
 else

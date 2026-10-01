@@ -14,6 +14,8 @@ Build-Depends: debhelper-compat (= 13),
                libjson-perl,
                liblinux-inotify2-perl,
                libmime-base32-perl <!nocheck>,
+# only needed by the systemd PVE::InitSystem backend; excluded when building
+# the sysvinit variant (e.g. for Devuan), see debian/rules
                libnet-dbus-perl <!nocheck> <!pkg.pve-common.sysvinit>,
                libnet-ip-perl,
                libnet-ldap-perl <!nocheck>,
@@ -41,6 +43,8 @@ Depends: libanyevent-perl,
          libjson-perl,
          liblinux-inotify2-perl,
          libmime-base32-perl,
+# only needed by the systemd PVE::InitSystem backend; excluded when building
+# the sysvinit variant (e.g. for Devuan), see debian/rules
          libnet-dbus-perl <!pkg.pve-common.sysvinit>,
          libnet-ip-perl,
          libnet-ldap-perl,
