@@ -1,18 +1,20 @@
 package PVE::Systemd;
 
+# NOTE: the init-manager-specific subs below (enter_systemd_scope,
+# wait_for_unit_removed, is_unit_active, get_timezone, set_timezone,
+# list_timezones) are kept here only for API compatibility - they delegate
+# to PVE::InitSystem, which is where the actual (currently systemd-only)
+# implementation lives. New code should call PVE::InitSystem directly.
+
 use strict;
 use warnings;
 
 use IO::Socket::UNIX;
-use Net::DBus qw(dbus_uint32 dbus_uint64 dbus_boolean);
-use Net::DBus::Callback;
-use Net::DBus::Reactor;
 use POSIX qw(EINTR);
 use Socket qw(SOCK_DGRAM);
 
-use PVE::Cmd qw(run);
-use PVE::Exception qw(raise_param_exc);
 use PVE::File qw(file_set_contents file_get_contents);
+use PVE::InitSystem;
 use PVE::Tools qw(trim);
 
 sub escape_unit {
@@ -40,182 +42,20 @@ sub unescape_unit {
     return $val;
 }
 
-# $code should take the parameters ($interface, $reactor, $finish_callback).
-#
-# $finish_callback can be used by dbus-signal-handlers to stop the reactor.
-#
-# In order to even start waiting on the reactor, $code needs to return undef, if it returns a
-# defined value instead, it is assumed that this is the result already and we can stop.
-# NOTE: This calls the dbus main loop and must not be used when another dbus
-# main loop is being used as we need to wait signals.
-sub systemd_call($;$) {
-    my ($code, $timeout) = @_;
-
-    my $bus = Net::DBus->system();
-    my $reactor = Net::DBus::Reactor->main();
-
-    my $service = $bus->get_service('org.freedesktop.systemd1');
-    my $if = $service->get_object('/org/freedesktop/systemd1', 'org.freedesktop.systemd1.Manager');
-
-    my ($finished, $current_result, $timer, $signal_info);
-    my $finish_callback = sub {
-        my ($result) = @_;
-
-        $current_result = $result;
-
-        $finished = 1;
-
-        if (defined($timer)) {
-            $reactor->remove_timeout($timer);
-            $timer = undef;
-        }
-
-        if (defined($signal_info)) {
-            $if->disconnect_from_signal($signal_info->{name}, $signal_info->{handle});
-            $signal_info = undef;
-        }
-
-        if (defined($reactor)) {
-            $reactor->shutdown();
-            $reactor = undef;
-        }
-    };
-
-    (my $result, $signal_info) = $code->($if, $reactor, $finish_callback);
-    # Are we done immediately?
-    return $result if defined $result;
-
-    # Alterantively $finish_callback may have been called already?
-    return $current_result if $finished;
-
-    # Otherwise wait:
-    my $on_timeout = sub {
-        $finish_callback->(undef);
-        die "timeout waiting on systemd\n";
-    };
-    $timer = $reactor->add_timeout($timeout * 1000, Net::DBus::Callback->new(method => $on_timeout))
-        if defined($timeout);
-
-    $reactor->run();
-    $reactor->shutdown() if defined($reactor); # $finish_callback clears it
-
-    return $current_result;
-}
-
 # Polling the job status instead doesn't work because this doesn't give us the
 # distinction between success and failure.
 #
 # Note that the description is mandatory for security reasons.
 sub enter_systemd_scope {
-    my ($unit, $description, %extra) = @_;
-    die "missing description\n" if !defined($description);
-
-    my $timeout = delete $extra{timeout};
-
-    $unit .= '.scope';
-    my $properties = [[PIDs => [dbus_uint32($$)]]];
-
-    foreach my $key (keys %extra) {
-        if ($key eq 'Slice' || $key eq 'KillMode' || $key eq 'After' || $key eq 'Before') {
-            push @{$properties}, [$key, $extra{$key}];
-        } elsif ($key eq 'SendSIGKILL') {
-            push @{$properties}, [$key, dbus_boolean($extra{$key})];
-        } elsif ($key eq 'CPUShares' || $key eq 'CPUWeight' || $key eq 'TimeoutStopUSec') {
-            push @{$properties}, [$key, dbus_uint64($extra{$key})];
-        } elsif ($key eq 'CPUQuota') {
-            push @{$properties}, ['CPUQuotaPerSecUSec', dbus_uint64($extra{$key} * 10_000)];
-        } else {
-            die "Don't know how to encode $key for systemd scope\n";
-        }
-    }
-
-    systemd_call(
-        sub {
-            my ($if, $reactor, $finish_cb) = @_;
-
-            my $job;
-
-            my $signal_name = 'JobRemoved';
-            my $signal_handle = $if->connect_to_signal(
-                $signal_name,
-                sub {
-                    my ($id, $removed_job, $signaled_unit, $result) = @_;
-                    return if $signaled_unit ne $unit || $removed_job ne $job;
-                    if ($result ne 'done') {
-                        # I seem to remember $reactor->run() catching die() at some point?
-                        # so better call finish to be sure...:
-                        $finish_cb->(0);
-                        die "systemd job failed\n";
-                    } else {
-                        $finish_cb->(1);
-                    }
-                },
-            );
-
-            $job = $if->StartTransientUnit($unit, 'fail', $properties, []);
-
-            my $signal_info = {
-                name => $signal_name,
-                handle => $signal_handle,
-            };
-
-            return (undef, $signal_info);
-        },
-        $timeout,
-    );
+    return PVE::InitSystem::enter_systemd_scope(@_);
 }
 
 sub wait_for_unit_removed($;$) {
-    my ($unit, $timeout) = @_;
-
-    systemd_call(
-        sub {
-            my ($if, $reactor, $finish_cb) = @_;
-
-            my $unit_obj = eval { $if->GetUnit($unit) };
-            return 1 if !$unit_obj;
-
-            my $signal_name = 'UnitRemoved';
-            my $signal_handle = $if->connect_to_signal(
-                $signal_name,
-                sub {
-                    my ($id, $removed_unit) = @_;
-                    $finish_cb->(1) if $removed_unit eq $unit_obj;
-                },
-            );
-
-            my $signal_info = {
-                name => $signal_name,
-                handle => $signal_handle,
-            };
-
-            # Deal with what we lost between GetUnit() and connecting to UnitRemoved:
-            my $unit_obj_new = eval { $if->GetUnit($unit) };
-            if (!$unit_obj_new) {
-                return (1, $signal_info);
-            }
-
-            return (undef, $signal_info);
-        },
-        $timeout,
-    );
+    return PVE::InitSystem::wait_for_unit_removed(@_);
 }
 
 sub is_unit_active($;$) {
-    my ($unit) = @_;
-
-    my $bus = Net::DBus->system();
-    my $reactor = Net::DBus::Reactor->main();
-
-    my $service = $bus->get_service('org.freedesktop.systemd1');
-    my $if = $service->get_object('/org/freedesktop/systemd1', 'org.freedesktop.systemd1.Manager');
-
-    my $unit_path = eval { $if->GetUnit($unit) }
-        or return 0;
-    $if = $service->get_object($unit_path, 'org.freedesktop.systemd1.Unit')
-        or return 0;
-    my $state = $if->ActiveState;
-    return defined($state) && $state eq 'active';
+    return PVE::InitSystem::is_unit_active(@_);
 }
 
 sub read_ini {
@@ -288,35 +128,16 @@ sub write_ini {
     file_set_contents($filename, $content);
 }
 
-# Use systemds timedatectl for managing timezone settings
 sub get_timezone {
-    my $timezone;
-
-    run(
-        ['timedatectl', 'show', '--property=Timezone', '--value'],
-        outfunc => sub { $timezone //= shift },
-    );
-
-    return $timezone;
+    return PVE::InitSystem::get_timezone(@_);
 }
 
 sub set_timezone {
-    my ($timezone) = @_;
-
-    raise_param_exc({ 'timezone' => "No such timezone" })
-        if (!grep { $_ eq $timezone } list_timezones());
-
-    run(['timedatectl', 'set-timezone', $timezone]);
+    return PVE::InitSystem::set_timezone(@_);
 }
 
 sub list_timezones {
-    my @timezones = ();
-
-    run(
-        ['timedatectl', 'list-timezones'], outfunc => sub { push(@timezones, shift); },
-    );
-
-    return @timezones;
+    return PVE::InitSystem::list_timezones(@_);
 }
 
 =head3 notify()

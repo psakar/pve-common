@@ -20,6 +20,7 @@ use English;
 
 use PVE::SafeSyslog;
 use PVE::INotify;
+use PVE::InitSystem;
 
 use POSIX ":sys_wait_h";
 use Fcntl ':flock';
@@ -656,7 +657,7 @@ sub register_start_command {
             if (&$init_ppid() || $param->{debug}) {
                 $self->start($param->{debug});
             } else {
-                PVE::Cmd::run(['systemctl', 'start', $self->{name}]);
+                PVE::InitSystem::start_service($self->{name});
             }
 
             return undef;
@@ -707,8 +708,7 @@ sub register_restart_command {
             if (&$init_ppid()) {
                 &$reload_daemon($self, $use_hup);
             } else {
-                PVE::Cmd::run(
-                    ['systemctl', $use_hup ? 'reload-or-restart' : 'restart', $self->{name}]);
+                PVE::InitSystem::restart_service($self->{name}, $use_hup);
             }
 
             return undef;
@@ -764,7 +764,7 @@ sub register_stop_command {
             if (&$init_ppid()) {
                 $self->stop();
             } else {
-                PVE::Cmd::run(['systemctl', 'stop', $self->{name}]);
+                PVE::InitSystem::stop_service($self->{name});
             }
 
             return undef;
