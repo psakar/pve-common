@@ -21,6 +21,7 @@ LIB_SOURCES = \
 	Format.pm \
 	INotify.pm \
 	IPRoute2.pm \
+	InitSystem.pm \
 	InitSystem/Systemd.pm \
 	JSONSchema.pm \
 	Job/Registry.pm \

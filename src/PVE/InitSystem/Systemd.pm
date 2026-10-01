@@ -1,44 +1,21 @@
 package PVE::InitSystem::Systemd;
 
+# systemd backend for PVE::InitSystem - talks to systemd over D-Bus for
+# service and scope management, and shells out to systemd's timedatectl for
+# timezone handling.
+#
+# See PVE::InitSystem for the backend-agnostic interface that callers should
+# use instead of this module directly.
+
 use strict;
 use warnings;
 
-use IO::Socket::UNIX;
 use Net::DBus qw(dbus_uint32 dbus_uint64 dbus_boolean);
 use Net::DBus::Callback;
 use Net::DBus::Reactor;
-use POSIX qw(EINTR);
-use Socket qw(SOCK_DGRAM);
 
 use PVE::Cmd qw(run);
 use PVE::Exception qw(raise_param_exc);
-use PVE::File qw(file_set_contents file_get_contents);
-use PVE::Tools qw(trim);
-
-sub escape_unit {
-    my ($val, $is_path) = @_;
-
-    # NOTE: this is not complete, but enough for our needs. normally all
-    # characters which are not alpha-numerical, '.' or '_' would need escaping
-    $val =~ s/\-/\\x2d/g;
-
-    if ($is_path) {
-        $val =~ s/^\///g;
-        $val =~ s/\/$//g;
-    }
-    $val =~ s/\//-/g;
-
-    return $val;
-}
-
-sub unescape_unit {
-    my ($val) = @_;
-
-    $val =~ s/-/\//g;
-    $val =~ s/\\x([a-fA-F0-9]{2})/chr(hex($1))/eg;
-
-    return $val;
-}
 
 # $code should take the parameters ($interface, $reactor, $finish_callback).
 #
@@ -218,74 +195,25 @@ sub is_unit_active($;$) {
     return defined($state) && $state eq 'active';
 }
 
-sub read_ini {
-    my ($filename) = @_;
+# Start/stop/restart a service unit via systemctl. Used by PVE::Daemon's
+# start/stop/restart API calls when they're not invoked by the service itself
+# (i.e. when init didn't directly fork us).
+sub start_service {
+    my ($name) = @_;
 
-    my $content = file_get_contents($filename);
-    my @lines = split /\n/, $content;
-
-    my $result = {};
-    my $section;
-
-    foreach my $line (@lines) {
-        $line = trim($line);
-        if ($line =~ m/^\[([^\]]+)\]/) {
-            $section = $1;
-            if (!defined($result->{$section})) {
-                $result->{$section} = {};
-            }
-        } elsif ($line =~ m/^(.*?)=(.*)$/) {
-            my ($key, $val) = ($1, $2);
-            if (!$section) {
-                warn "key value pair found without section, skipping\n";
-                next;
-            }
-
-            if ($result->{$section}->{$key}) {
-                # make duplicate properties to arrays to keep the order
-                my $prop = $result->{$section}->{$key};
-                if (ref($prop) eq 'ARRAY') {
-                    push @$prop, $val;
-                } else {
-                    $result->{$section}->{$key} = [$prop, $val];
-                }
-            } else {
-                $result->{$section}->{$key} = $val;
-            }
-        }
-        # ignore everything else
-    }
-
-    return $result;
+    run(['systemctl', 'start', $name]);
 }
 
-sub write_ini {
-    my ($ini, $filename) = @_;
+sub stop_service {
+    my ($name) = @_;
 
-    my $content = "";
+    run(['systemctl', 'stop', $name]);
+}
 
-    foreach my $sname (sort keys %$ini) {
-        my $section = $ini->{$sname};
+sub restart_service {
+    my ($name, $use_hup) = @_;
 
-        $content .= "[$sname]\n";
-
-        foreach my $pname (sort keys %$section) {
-            my $prop = $section->{$pname};
-
-            if (!ref($prop)) {
-                $content .= "$pname=$prop\n";
-            } elsif (ref($prop) eq 'ARRAY') {
-                foreach my $val (@$prop) {
-                    $content .= "$pname=$val\n";
-                }
-            } else {
-                die "invalid property '$pname'\n";
-            }
-        }
-        $content .= "\n";
-    }
-
-    file_set_contents($filename, $content);
+    run(['systemctl', $use_hup ? 'reload-or-restart' : 'restart', $name]);
 }
 
 # Use systemds timedatectl for managing timezone settings
@@ -317,52 +245,6 @@ sub list_timezones {
     );
 
     return @timezones;
-}
-
-=head3 notify()
-
-This is a pure Perl reimplementation of systemd's C<sd_notify()> mechanism as defined in
-C<systemd/sd-daemon.h>, based on the example implementations in C<man 3 sd_notify>. Does not return
-a value, but dies upon error.
-
-=cut
-
-sub notify {
-    my ($message) = @_;
-
-    # nothing to do if there is no socket
-    my $socket_path = $ENV{NOTIFY_SOCKET} or return;
-
-    die "notify systemd invalid socket path '$socket_path'\n" if $socket_path !~ m|^[/@]|;
-    die "notify systemd called without a message\n" if !$message;
-
-    # might be an abstract socket
-    $socket_path =~ s/^@/\0/;
-
-    my $socket = IO::Socket::UNIX->new(
-        Type => SOCK_DGRAM(),
-        Peer => $socket_path,
-    ) or die "notify systemd: unable to connect to socket $socket_path - $IO::Socket::errstr\n";
-
-    # we won't be reading from the socket
-    $socket->shutdown(SHUT_RD);
-
-    my $res;
-    while (1) {
-        $res = $socket->send($message);
-        if ($res) {
-            die "notify systemd: protocol error writing to socket '$socket_path'\n"
-                if $res < length($message);
-            last;
-        } else {
-            next if $! == EINTR;
-            die "notify systemd: sending to '$socket_path' failed - $!\n";
-        }
-    }
-
-    close($socket);
-
-    return;
 }
 
 1;
