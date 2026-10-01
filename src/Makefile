@@ -21,6 +21,7 @@ LIB_SOURCES = \
 	Format.pm \
 	INotify.pm \
 	IPRoute2.pm \
+	InitSystem/Systemd.pm \
 	JSONSchema.pm \
 	Job/Registry.pm \
 	LDAP.pm \
@@ -47,6 +48,7 @@ all:
 
 install: $(addprefix PVE/,$(LIB_SOURCES))
 	install -d -m 0755 $(DESTDIR)$(PERLDIR)/PVE
+	install -d -m 0755 $(DESTDIR)$(PERLDIR)/PVE/InitSystem
 	install -d -m 0755 $(DESTDIR)$(PERLDIR)/PVE/Job
 	install -d -m 0755 $(DESTDIR)$(PERLDIR)/PVE/Network
 	for i in $(LIB_SOURCES); do install -D -m 0644 PVE/$$i $(DESTDIR)$(PERLDIR)/PVE/$$i; done
