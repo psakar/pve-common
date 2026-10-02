@@ -37,6 +37,8 @@ use PVE::File qw(file_get_contents file_set_contents);
 use PVE::ProcFSTools;
 
 use constant SCOPE_PARENT_SLICE => 'pve.slice';
+# controllers delegated down to the scopes, if the kernel provides them
+use constant SCOPE_CONTROLLERS => qw(cpu io memory pids);
 use constant WAIT_POLL_INTERVAL_US => 200_000; # 0.2s, while waiting for a scope to empty out
 use constant ZONEINFO_DIR => '/usr/share/zoneinfo';
 
@@ -47,6 +49,27 @@ my sub scope_cgroup_path {
         if PVE::CGroup::cgroup_mode() != 2;
 
     return PVE::CGroup::cgroupv2_base_path() . '/' . SCOPE_PARENT_SLICE . "/$unit";
+}
+
+# Create SCOPE_PARENT_SLICE and delegate SCOPE_CONTROLLERS from the cgroupv2
+# root down through it, so that scopes below it get their cpu.max/cpu.weight/...
+# interface files. Under systemd this delegation is done by systemd itself;
+# here nobody else does it (OpenRC only enables controllers for its own
+# per-service cgroups), and without it a scope only has the cgroup.* core
+# files. This is fine with cgroupv2's "no internal processes" rule as long as
+# nothing is placed in the slice itself, only in scopes below it.
+my sub setup_scope_parent {
+    my $base = PVE::CGroup::cgroupv2_base_path();
+    my $slice = "$base/" . SCOPE_PARENT_SLICE;
+
+    make_path($slice);
+
+    for my $cgroup ($base, $slice) {
+        my %available = map { $_ => 1 } split(/\s+/, file_get_contents("$cgroup/cgroup.controllers"));
+        my @enable = map { "+$_" } grep { $available{$_} } SCOPE_CONTROLLERS;
+        next if !@enable;
+        PVE::ProcFSTools::write_proc_entry("$cgroup/cgroup.subtree_control", join(' ', @enable));
+    }
 }
 
 sub start_service {
@@ -83,17 +106,10 @@ sub enter_systemd_scope {
     $unit .= '.scope';
     my $path = scope_cgroup_path($unit);
 
-    make_path($path);
-    PVE::ProcFSTools::write_proc_entry("$path/cgroup.procs", "$$");
-
-    if (defined(my $quota = delete $extra{CPUQuota})) {
-        my $period = 100_000; # 100ms, matches systemd's default accounting period
-        PVE::ProcFSTools::write_proc_entry("$path/cpu.max", int($quota * $period / 100) . " $period");
-    }
-
-    if (defined(my $weight = delete $extra{CPUWeight})) {
-        PVE::ProcFSTools::write_proc_entry("$path/cpu.weight", $weight);
-    }
+    # Validate everything before touching the cgroup tree, so that a rejected
+    # property leaves neither a stray scope nor the caller moved into it.
+    my $quota = delete $extra{CPUQuota};
+    my $weight = delete $extra{CPUWeight};
 
     delete $extra{$_} for qw(Slice KillMode After Before SendSIGKILL TimeoutStopUSec timeout);
 
@@ -101,6 +117,21 @@ sub enter_systemd_scope {
         die "don't know how to apply " . join(', ', sort keys %extra)
             . " for an LSBService resource scope\n";
     }
+
+    setup_scope_parent();
+    make_path($path);
+
+    if (defined($quota)) {
+        my $period = 100_000; # 100ms, matches systemd's default accounting period
+        PVE::ProcFSTools::write_proc_entry("$path/cpu.max", int($quota * $period / 100) . " $period");
+    }
+
+    if (defined($weight)) {
+        PVE::ProcFSTools::write_proc_entry("$path/cpu.weight", $weight);
+    }
+
+    # move ourselves in last, once the limits are in place
+    PVE::ProcFSTools::write_proc_entry("$path/cgroup.procs", "$$");
 
     return 1;
 }
@@ -144,7 +175,14 @@ sub is_unit_active($;$) {
     return $events =~ m/^populated\s+1\s*$/m ? 1 : 0;
 }
 
+# The /etc/localtime symlink is authoritative (it's also what timedatectl reads
+# in the systemd backend). /etc/timezone is only a fallback: tzdata stopped
+# shipping it with Debian 13 trixie (and thus Devuan 6 excalibur).
 sub get_timezone {
+    if (defined(my $target = readlink('/etc/localtime'))) {
+        return $1 if $target =~ m{(?:^|/)zoneinfo/(.+)$};
+    }
+
     my $tz = eval { file_get_contents('/etc/timezone') };
     return undef if !defined($tz);
 
@@ -158,7 +196,8 @@ sub set_timezone {
     raise_param_exc({ 'timezone' => "No such timezone" })
         if (!grep { $_ eq $timezone } list_timezones());
 
-    file_set_contents('/etc/timezone', "$timezone\n");
+    # only keep /etc/timezone in sync where it still exists, don't recreate it
+    file_set_contents('/etc/timezone', "$timezone\n") if -e '/etc/timezone';
 
     unlink('/etc/localtime');
     symlink(ZONEINFO_DIR . "/$timezone", '/etc/localtime')
