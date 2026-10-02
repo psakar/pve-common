@@ -1,0 +1,4 @@
+# Only installed by the pkg.pve-common.lsbservice build (see debian/rules), which
+# is meant for systemd-free derivatives like Devuan: there's intentionally no
+# systemd unit for the init script, systemd users get the default build.
+libpve-common-perl: missing-systemd-service-for-init.d-script pve-service-instances *
