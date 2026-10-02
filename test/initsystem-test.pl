@@ -76,6 +76,17 @@ my sub mock_run($module, $handler) {
     is_deeply($calls->[-1], ['update-rc.d', 'pveproxy', 'disable'], 'disable_service: update-rc.d disable');
 }
 
+# --- started_by_init -------------------------------------------------------
+
+{
+    local $ENV{PVE_INIT_SCRIPT};
+    ok(!PVE::InitSystem::LSBService::started_by_init(), 'started_by_init: not without marker');
+    $ENV{PVE_INIT_SCRIPT} = 1;
+    ok(PVE::InitSystem::LSBService::started_by_init(), 'started_by_init: marker set by init script');
+    ok(!exists($ENV{PVE_INIT_SCRIPT}), 'started_by_init: marker is consumed');
+    ok(!PVE::InitSystem::LSBService::started_by_init(), 'started_by_init: only once');
+}
+
 # --- LSBService: service_status --------------------------------------------
 
 {

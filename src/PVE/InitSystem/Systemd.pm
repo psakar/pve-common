@@ -216,6 +216,12 @@ sub restart_service {
     run(['systemctl', $use_hup ? 'reload-or-restart' : 'restart', $name]);
 }
 
+# Whether we were run by the init system itself, e.g. as a unit's ExecStart=,
+# rather than by a user or another service. systemd runs those as its children.
+sub started_by_init {
+    return getppid() == 1;
+}
+
 sub reload_service {
     my ($name) = @_;
 
