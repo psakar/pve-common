@@ -9,15 +9,15 @@ PERLDIR=$(PREFIX)/share/perl5
 # Which init-system backend PVE::InitSystem is built against. Can be
 # overridden on the command line, e.g. by debian/rules depending on which
 # Debian build profile is active (see debian/control's
-# pkg.pve-common.sysvinit profile).
+# pkg.pve-common.lsbservice profile).
 PVE_INIT_SYSTEM ?= systemd
 
 ifeq ($(PVE_INIT_SYSTEM),systemd)
 INIT_SYSTEM_BACKEND = Systemd
-else ifeq ($(PVE_INIT_SYSTEM),sysvinit)
+else ifeq ($(PVE_INIT_SYSTEM),lsbservice)
 INIT_SYSTEM_BACKEND = LSBService
 else
-$(error unsupported PVE_INIT_SYSTEM '$(PVE_INIT_SYSTEM)' (expected 'systemd' or 'sysvinit'))
+$(error unsupported PVE_INIT_SYSTEM '$(PVE_INIT_SYSTEM)' (expected 'systemd' or 'lsbservice'))
 endif
 
 LIB_SOURCES = \
