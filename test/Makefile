@@ -17,6 +17,7 @@ TESTS = lock_file.test			\
 	file-test.test \
 	cmd-test.test \
 	initsystem-test.test \
+	initsystem-taint-test.test \
 
 all:
 
