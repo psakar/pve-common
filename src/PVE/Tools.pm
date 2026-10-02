@@ -820,39 +820,12 @@ sub dump_logfile {
     return ($state{'count'}, $state{'lines'});
 }
 
+# Kept for API compatibility, reads the system log via the init-system backend
+# (the journal under systemd). New code should call PVE::InitSystem::dump_syslog.
 sub dump_journal {
-    my ($start, $limit, $since, $until, $service) = @_;
+    require PVE::InitSystem; # PVE::InitSystem's backends use PVE::Tools
 
-    my $lines = [];
-    my $count = 0;
-
-    $start = 0 if !$start;
-    $limit = 50 if !$limit;
-
-    my $parser = sub {
-        my $line = shift;
-
-        return if $count++ < $start;
-        return if $limit <= 0;
-        push @$lines, { n => int($count), t => $line };
-        $limit--;
-    };
-
-    my $cmd = ['journalctl', '-o', 'short', '--no-pager'];
-
-    push @$cmd, '--unit', $service if $service;
-    push @$cmd, '--since', $since if $since;
-    push @$cmd, '--until', $until if $until;
-    run_command($cmd, outfunc => $parser);
-
-    # HACK: ExtJS store.guaranteeRange() does not like empty array
-    # so we add a line
-    if (!$count) {
-        $count++;
-        push @$lines, { n => $count, t => "no content" };
-    }
-
-    return ($count, $lines);
+    return PVE::InitSystem::dump_syslog(@_);
 }
 
 sub dir_glob_regex {

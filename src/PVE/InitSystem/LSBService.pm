@@ -29,12 +29,14 @@ use warnings;
 use File::Find qw(find);
 use File::Path qw(make_path);
 use Time::HiRes qw(usleep);
+use Time::Local qw(timegm timelocal);
 
 use PVE::CGroup;
 use PVE::Cmd qw(run);
 use PVE::Exception qw(raise_param_exc);
 use PVE::File qw(file_get_contents file_set_contents);
 use PVE::ProcFSTools;
+use PVE::Tools ();
 
 use constant SCOPE_PARENT_SLICE => 'pve.slice';
 # controllers delegated down to the scopes, if the kernel provides them
@@ -72,16 +74,59 @@ my sub setup_scope_parent {
     }
 }
 
+# Paths are package variables so that tests can point them elsewhere.
+our $INITD_DIR = '/etc/init.d';
+# sysv-rc start links and OpenRC runlevels, either marks a service as enabled
+our $RC_DIR_GLOB = '/etc/rc[2345].d';
+our $OPENRC_RUNLEVEL_GLOB = '/etc/runlevels/*';
+# oldest first, only uncompressed files are read
+our $SYSLOG_FILES = ['/var/log/syslog.1', '/var/log/syslog'];
+
+# Names that systemd resolves as unit aliases, mapped to the Debian init script
+# providing them. A '.service' suffix is accepted and dropped.
+my $service_aliases = {
+    sshd => 'ssh',
+    syslog => 'rsyslog',
+};
+
+my sub init_script_name {
+    my ($name) = @_;
+
+    $name =~ s/\.service$//;
+    return $service_aliases->{$name} // $name;
+}
+
+# LSB 'status' exit codes, see the LSB core spec's "Init Script Actions"
+my $lsb_status_states = {
+    0 => ['active', 'running'],
+    1 => ['failed', 'failed'], # dead, but pid file exists
+    2 => ['failed', 'failed'], # dead, but lock file exists
+    3 => ['inactive', 'dead'],
+};
+
+my sub service_cmd {
+    my ($name, $action, %param) = @_;
+
+    return run(['service', init_script_name($name), $action], %param);
+}
+
+my sub service_running {
+    my ($name) = @_;
+
+    my $rc = service_cmd($name, 'status', noerr => 1, outfunc => sub { }, errfunc => sub { });
+    return $rc == 0;
+}
+
 sub start_service {
     my ($name) = @_;
 
-    run(['service', $name, 'start']);
+    service_cmd($name, 'start');
 }
 
 sub stop_service {
     my ($name) = @_;
 
-    run(['service', $name, 'stop']);
+    service_cmd($name, 'stop');
 }
 
 sub restart_service {
@@ -90,11 +135,207 @@ sub restart_service {
     if ($use_hup) {
         # LSB init scripts aren't guaranteed to support 'reload', fall back
         # to a full restart if it fails (mirroring systemd's reload-or-restart).
-        eval { run(['service', $name, 'reload']); };
+        eval { service_cmd($name, 'reload'); };
         return if !$@;
     }
 
-    run(['service', $name, 'restart']);
+    service_cmd($name, 'restart');
+}
+
+sub reload_service {
+    my ($name) = @_;
+
+    service_cmd($name, 'reload');
+}
+
+sub try_reload_or_restart_service {
+    my (@names) = @_;
+
+    for my $name (@names) {
+        restart_service($name, 1) if service_running($name);
+    }
+}
+
+# update-rc.d drives both sysv-rc (insserv) and OpenRC on Devuan. 'defaults'
+# first, since 'enable' only toggles links that already exist. There's no
+# equivalent of systemd's --runtime, so $opts{runtime} is applied persistently.
+sub enable_service {
+    my ($name, %opts) = @_;
+
+    my $script = init_script_name($name);
+    run(['update-rc.d', $script, 'defaults']);
+    run(['update-rc.d', $script, 'enable']);
+}
+
+sub disable_service {
+    my ($name, %opts) = @_;
+
+    run(['update-rc.d', init_script_name($name), 'disable']);
+}
+
+my sub lsb_header_field {
+    my ($script, $field) = @_;
+
+    my $content = eval { file_get_contents($script) } // '';
+    return $1 if $content =~ m/^### BEGIN INIT INFO\n(?:#.*\n)*?#\s*\Q$field\E:\s*(.*?)\s*$/m;
+    return undef;
+}
+
+my sub service_enabled {
+    my ($script) = @_;
+
+    return 1 if glob("$RC_DIR_GLOB/S[0-9][0-9]$script");
+    return 1 if grep { -l "$_/$script" || -e "$_/$script" } glob($OPENRC_RUNLEVEL_GLOB);
+    return 0;
+}
+
+# See PVE::InitSystem::Systemd::service_status for the returned hash. The type
+# and result of the last run aren't known for init scripts and stay undef.
+sub service_status {
+    my ($name) = @_;
+
+    my $script = init_script_name($name);
+    my $path = "$INITD_DIR/$script";
+
+    if (!-x $path) {
+        return {
+            description => undef,
+            load_state => 'not-found',
+            unit_state => undef,
+            active_state => 'inactive',
+            sub_state => 'dead',
+            type => undef,
+            result => undef,
+        };
+    }
+
+    my $rc = service_cmd($name, 'status', noerr => 1, outfunc => sub { }, errfunc => sub { });
+    my ($active_state, $sub_state) = ($lsb_status_states->{$rc} // ['unknown', 'unknown'])->@*;
+
+    return {
+        description => lsb_header_field($path, 'Short-Description')
+            // lsb_header_field($path, 'Description') // $script,
+        load_state => 'loaded',
+        unit_state => service_enabled($script) ? 'enabled' : 'disabled',
+        active_state => $active_state,
+        sub_state => $sub_state,
+        type => undef,
+        result => undef,
+    };
+}
+
+# Init scripts have no generic way to report their main PID, so this checks
+# the pid file the script declares (PIDFILE=..., as most Debian scripts do and
+# OpenRC's pidfile=...), then the conventional locations.
+sub service_main_pid {
+    my ($name) = @_;
+
+    my $script = init_script_name($name);
+    my $content = eval { file_get_contents("$INITD_DIR/$script") } // '';
+    my @declared = $content =~ m/^\s*(?:PIDFILE|pidfile)=["']?(\/[^"'\s\$]+)["']?\s*$/mg;
+
+    for my $pidfile (@declared, "/run/$script.pid", "/run/$script/$script.pid") {
+        my $pid = eval { file_get_contents($pidfile) } // next;
+        next if $pid !~ m/^\s*(\d+)\s*$/;
+        return int($1) if PVE::ProcFSTools::check_process_running($1);
+    }
+
+    return 0;
+}
+
+# The syslog tag a service's messages are logged under, where it differs from
+# the service name (also accepting the systemd unit names callers may pass).
+my $log_tag_aliases = {
+    ssh => 'sshd',
+    'postfix@-' => 'postfix',
+};
+
+my $month_numbers = {
+    Jan => 0, Feb => 1, Mar => 2, Apr => 3, May => 4, Jun => 5,
+    Jul => 6, Aug => 7, Sep => 8, Oct => 9, Nov => 10, Dec => 11,
+};
+
+# Parse the timestamp and program tag of an rsyslog line, either in the
+# RFC 3339 format (rsyslog's default since Debian 12) or the traditional one.
+my sub parse_syslog_line {
+    my ($line, $now) = @_;
+
+    if ($line =~ m/^(\d{4})-(\d\d)-(\d\d)T(\d\d):(\d\d):(\d\d)(?:\.\d+)?(Z|[+-]\d\d:\d\d)\s+\S+\s+([^\s\[:]+)/) {
+        my $time = timegm($6, $5, $4, $3, $2 - 1, $1);
+        if ($7 ne 'Z') {
+            my ($sign, $h, $m) = $7 =~ m/^([+-])(\d\d):(\d\d)$/;
+            $time -= ($sign eq '+' ? 1 : -1) * ($h * 3600 + $m * 60);
+        }
+        return ($time, $8);
+    } elsif ($line =~ m/^(\w{3})\s+(\d+) (\d\d):(\d\d):(\d\d)\s+\S+\s+([^\s\[:]+)/) {
+        my $mon = $month_numbers->{$1} // return;
+        my $year = (localtime($now))[5] + 1900;
+        my $time = timelocal($5, $4, $3, $2, $mon, $year);
+        # no year in the line, so a date in the future is from last year
+        $time = timelocal($5, $4, $3, $2, $mon, $year - 1) if $time > $now + 86400;
+        return ($time, $6);
+    }
+
+    return;
+}
+
+# Parse a 'YYYY-MM-DD[ HH:MM[:SS]]' local time, as accepted by journalctl
+# --since/--until (see SYSTEMD_DATETIME_FORMAT in the API schemas).
+my sub parse_datetime {
+    my ($str) = @_;
+
+    die "unable to parse date-time '$str'\n"
+        if $str !~ m/^(\d{4})-(\d\d)-(\d\d)(?:[ T](\d\d):(\d\d)(?::(\d\d))?)?$/;
+
+    return timelocal($6 // 0, $5 // 0, $4 // 0, $3, $2 - 1, $1);
+}
+
+# See PVE::InitSystem::Systemd::dump_syslog. Reads the rsyslog files instead of
+# the journal; $service matches the program tag (e.g. 'pveproxy[1234]:', or
+# 'postfix/smtpd[42]:' for 'postfix').
+sub dump_syslog {
+    my ($start, $limit, $since, $until, $service) = @_;
+
+    my $since_time = defined($since) && length($since) ? parse_datetime($since) : undef;
+    my $until_time = defined($until) && length($until) ? parse_datetime($until) : undef;
+
+    my $tag;
+    if ($service) {
+        $tag = init_script_name($service);
+        $tag = $log_tag_aliases->{$tag} // $tag;
+    }
+
+    my $now = time();
+    my $filter = sub {
+        my ($line) = @_;
+
+        return 1 if !defined($since_time) && !defined($until_time) && !defined($tag);
+
+        my ($time, $prog) = parse_syslog_line($line, $now);
+        return 0 if !defined($time);
+        return 0 if defined($since_time) && $time < $since_time;
+        return 0 if defined($until_time) && $time > $until_time;
+        return 0 if defined($tag) && $prog ne $tag && $prog !~ m/^\Q$tag\E\//;
+        return 1;
+    };
+
+    my $state = { start => $start // 0, limit => $limit || 50, final => 0 };
+    for my $file (@$SYSLOG_FILES) {
+        open(my $fh, '<', $file) or next;
+        PVE::Tools::dump_logfile_by_filehandle($fh, $filter, $state);
+        close($fh);
+    }
+
+    my ($count, $lines) = ($state->{count} // 0, $state->{lines} // []);
+
+    # HACK: ExtJS store.guaranteeRange() does not like empty array
+    # so we add a line
+    if (!$count) {
+        $count++;
+        push @$lines, { n => $count, t => "no content" };
+    }
+
+    return ($count, $lines);
 }
 
 # Note that the description is accepted (and required, as in the systemd
