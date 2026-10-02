@@ -1,10 +1,10 @@
 package PVE::Systemd;
 
-# NOTE: the init-manager-specific subs below (enter_systemd_scope,
+# NOTE: the init-manager-specific subs below (systemd_call, enter_systemd_scope,
 # wait_for_unit_removed, is_unit_active, get_timezone, set_timezone,
 # list_timezones) are kept here only for API compatibility - they delegate
-# to PVE::InitSystem, which is where the actual (currently systemd-only)
-# implementation lives. New code should call PVE::InitSystem directly.
+# to PVE::InitSystem or its backend, which is where the actual implementation
+# lives. New code should call PVE::InitSystem directly.
 
 use strict;
 use warnings;
@@ -40,6 +40,19 @@ sub unescape_unit {
     $val =~ s/\\x([a-fA-F0-9]{2})/chr(hex($1))/eg;
 
     return $val;
+}
+
+# Talks to systemd's manager over D-Bus, see PVE::InitSystem::Systemd. Kept for
+# callers needing systemd features beyond PVE::InitSystem's interface, e.g.
+# qemu-server changing properties of a running VM's scope. Only available with
+# the systemd backend, there's no systemd to talk to otherwise.
+sub systemd_call($;$) {
+    my $backend = $PVE::InitSystem::Backend::MODULE;
+    die "systemd_call is not available with the init-system backend '$backend'\n"
+        if $backend ne 'PVE::InitSystem::Systemd';
+
+    # '&' to pass @_ as is, despite the backend sub's ($;$) prototype
+    return &PVE::InitSystem::Systemd::systemd_call(@_);
 }
 
 # Polling the job status instead doesn't work because this doesn't give us the
