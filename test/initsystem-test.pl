@@ -1,0 +1,241 @@
+#!/usr/bin/perl
+
+# Tests for the service-state and system-log parts of the PVE::InitSystem
+# backends. Commands are mocked, so these don't need the respective init system
+# to be running. The Systemd backend is skipped if Net::DBus isn't available
+# (it isn't a build dependency of the lsbservice variant).
+
+use v5.36;
+
+use lib '../src';
+
+use File::Path qw(make_path remove_tree);
+use Test::MockModule;
+use Test::More;
+
+use PVE::File qw(file_set_contents);
+use PVE::InitSystem::LSBService;
+
+my $test_dir = "/tmp/test-initsystem-$$";
+make_path($test_dir);
+END { remove_tree($test_dir) if defined($test_dir) }
+
+# Mock the backend's run(): record commands, feed output lines, return an exit code.
+my sub mock_run($module, $handler) {
+    my $calls = [];
+    my $mock = Test::MockModule->new($module);
+    $mock->redefine(
+        run => sub ($cmd, %param) {
+            push @$calls, [@$cmd];
+            my ($rc, @lines) = $handler->($cmd);
+            if (my $outfunc = $param{outfunc}) {
+                $outfunc->($_) for @lines;
+            }
+            die "command '@$cmd' failed: exit code $rc\n" if $rc && !$param{noerr};
+            return $rc;
+        },
+    );
+    return ($mock, $calls);
+}
+
+# --- LSBService: service control -------------------------------------------
+
+{
+    my $running = { ssh => 1 };
+    my ($mock, $calls) = mock_run(
+        'PVE::InitSystem::LSBService',
+        sub ($cmd) {
+            return ($running->{ $cmd->[1] } ? 0 : 3) if $cmd->[2] && $cmd->[2] eq 'status';
+            return 0;
+        },
+    );
+
+    PVE::InitSystem::LSBService::start_service('sshd.service');
+    is_deeply($calls->[-1], ['service', 'ssh', 'start'], 'start: alias and .service suffix resolved');
+
+    PVE::InitSystem::LSBService::reload_service('syslog');
+    is_deeply($calls->[-1], ['service', 'rsyslog', 'reload'], 'reload: syslog maps to rsyslog');
+
+    @$calls = ();
+    PVE::InitSystem::LSBService::try_reload_or_restart_service('sshd', 'pveproxy.service');
+    is_deeply(
+        $calls,
+        [['service', 'ssh', 'status'], ['service', 'ssh', 'reload'], ['service', 'pveproxy', 'status']],
+        'try_reload_or_restart: only reloads running services',
+    );
+
+    @$calls = ();
+    PVE::InitSystem::LSBService::enable_service('pveproxy', runtime => 1);
+    is_deeply(
+        $calls,
+        [['update-rc.d', 'pveproxy', 'defaults'], ['update-rc.d', 'pveproxy', 'enable']],
+        'enable_service: update-rc.d defaults + enable',
+    );
+
+    PVE::InitSystem::LSBService::disable_service('pveproxy.service');
+    is_deeply($calls->[-1], ['update-rc.d', 'pveproxy', 'disable'], 'disable_service: update-rc.d disable');
+}
+
+# --- LSBService: service_status --------------------------------------------
+
+{
+    local $PVE::InitSystem::LSBService::INITD_DIR = "$test_dir/init.d";
+    local $PVE::InitSystem::LSBService::RC_DIR_GLOB = "$test_dir/rc[2345].d";
+    local $PVE::InitSystem::LSBService::OPENRC_RUNLEVEL_GLOB = "$test_dir/runlevels/*";
+    make_path("$test_dir/init.d", "$test_dir/rc2.d", "$test_dir/runlevels/default");
+
+    my $script = "#!/bin/sh\n### BEGIN INIT INFO\n# Provides: %s\n"
+        . "# Required-Start: \$remote_fs\n# Short-Description: %s\n### END INIT INFO\n";
+    for my $svc (qw(foo bar baz)) {
+        file_set_contents("$test_dir/init.d/$svc", sprintf($script, $svc, "The $svc daemon"));
+        chmod(0755, "$test_dir/init.d/$svc");
+    }
+    symlink("../init.d/foo", "$test_dir/rc2.d/S02foo"); # sysv-rc enabled
+    symlink("/etc/init.d/bar", "$test_dir/runlevels/default/bar"); # OpenRC enabled
+
+    my $status_rc = { foo => 0, bar => 3, baz => 1 };
+    my ($mock, $calls) = mock_run('PVE::InitSystem::LSBService', sub ($cmd) { $status_rc->{ $cmd->[1] } });
+
+    my $st = PVE::InitSystem::LSBService::service_status('foo.service');
+    is($st->{description}, 'The foo daemon', 'status: description from LSB header');
+    is($st->{load_state}, 'loaded', 'status: existing script is loaded');
+    is($st->{unit_state}, 'enabled', 'status: enabled via rc2.d start link');
+    is($st->{active_state}, 'active', 'status: exit 0 is active');
+    is($st->{sub_state}, 'running', 'status: exit 0 is running');
+
+    $st = PVE::InitSystem::LSBService::service_status('bar');
+    is($st->{unit_state}, 'enabled', 'status: enabled via OpenRC runlevel');
+    is($st->{active_state}, 'inactive', 'status: exit 3 is inactive');
+    is($st->{sub_state}, 'dead', 'status: exit 3 is dead');
+
+    $st = PVE::InitSystem::LSBService::service_status('baz');
+    is($st->{unit_state}, 'disabled', 'status: no start link or runlevel is disabled');
+    is($st->{active_state}, 'failed', 'status: exit 1 is failed');
+
+    my $calls_before = scalar(@$calls);
+    $st = PVE::InitSystem::LSBService::service_status('missing');
+    is($st->{load_state}, 'not-found', 'status: missing script is not-found');
+    is($st->{description}, undef, 'status: missing script has no description');
+    is(scalar(@$calls), $calls_before, 'status: missing script is not run');
+}
+
+# --- LSBService: dump_syslog -----------------------------------------------
+
+{
+    my $old = "$test_dir/syslog.1";
+    my $cur = "$test_dir/syslog";
+    local $PVE::InitSystem::LSBService::SYSLOG_FILES = [$old, "$test_dir/missing", $cur];
+
+    file_set_contents(
+        $old,
+        "2026-10-01T23:59:00.000001+01:00 host pveproxy[100]: old proxy line\n"
+            . "2026-10-02T00:30:00.000001+01:00 host sshd[200]: Accepted publickey\n",
+    );
+    file_set_contents(
+        $cur,
+        "2026-10-02T01:00:00.000001+01:00 host pvedaemon[300]: daemon line\n"
+            . "2026-10-02T02:00:00.000001+01:00 host postfix/smtpd[400]: connect from x\n"
+            . "2026-10-02T01:45:00.000001Z host pveproxy[101]: utc proxy line\n"
+            . "Oct  2 03:00:00 host pveproxy[102]: traditional format line\n",
+    );
+
+    my ($count, $lines) = PVE::InitSystem::LSBService::dump_syslog(0, 50);
+    is($count, 6, 'syslog: all lines of all existing files counted');
+    like($lines->[0]->{t}, qr/old proxy line/, 'syslog: rotated file comes first');
+    is($lines->[5]->{n}, 6, 'syslog: lines are numbered across files');
+
+    ($count, $lines) = PVE::InitSystem::LSBService::dump_syslog(1, 2);
+    is($count, 6, 'syslog paging: count is the full match count');
+    is_deeply([map { $_->{n} } @$lines], [2, 3], 'syslog paging: start/limit applied');
+
+    ($count, $lines) = PVE::InitSystem::LSBService::dump_syslog(0, 50, undef, undef, 'pveproxy');
+    is_deeply(
+        [map { ($_->{t} =~ m/: (.*)$/)[0] } @$lines],
+        ['old proxy line', 'utc proxy line', 'traditional format line'],
+        'syslog: filter by service tag, all timestamp formats parsed',
+    );
+
+    ($count, $lines) = PVE::InitSystem::LSBService::dump_syslog(0, 50, undef, undef, 'ssh');
+    like($lines->[0]->{t}, qr/Accepted publickey/, 'syslog: ssh service matches the sshd tag');
+    is($count, 1, 'syslog: only the sshd line');
+
+    ($count, $lines) = PVE::InitSystem::LSBService::dump_syslog(0, 50, undef, undef, 'postfix@-');
+    like($lines->[0]->{t}, qr/postfix\/smtpd/, 'syslog: postfix matches postfix/* sub-programs');
+
+    # TZ=UTC-1 (see Makefile), so local time is UTC+1
+    ($count, $lines) =
+        PVE::InitSystem::LSBService::dump_syslog(0, 50, '2026-10-02 00:30', '2026-10-02 02:30');
+    is_deeply(
+        [map { ($_->{t} =~ m/: (.*)$/)[0] } @$lines],
+        ['Accepted publickey', 'daemon line', 'connect from x'],
+        'syslog: since/until in local time, inclusive',
+    );
+
+    ($count, $lines) = PVE::InitSystem::LSBService::dump_syslog(0, 50, undef, undef, 'nonexistent');
+    is_deeply([$count, $lines], [1, [{ n => 1, t => 'no content' }]], 'syslog: no match gives "no content"');
+
+    eval { PVE::InitSystem::LSBService::dump_syslog(0, 50, 'yesterday') };
+    like($@, qr/unable to parse date-time 'yesterday'/, 'syslog: invalid since is rejected');
+}
+
+# --- Systemd ---------------------------------------------------------------
+
+SKIP: {
+    skip 'Net::DBus not available, skipping systemd backend tests', 8
+        if !eval { require PVE::InitSystem::Systemd; 1 };
+
+    my $show_output = [
+        'Type=oneshot', 'Result=success', 'LoadState=loaded', 'ActiveState=inactive',
+        'SubState=dead', 'UnitFileState=enabled', 'Description=PVE guests',
+        'ExecStart={ path=/usr/bin/pvesh ; argv[]=/usr/bin/pvesh --nooutput }', 'MainPID=0',
+    ];
+    my ($mock, $calls) = mock_run(
+        'PVE::InitSystem::Systemd',
+        sub ($cmd) {
+            return (0, @$show_output) if $cmd->[1] eq 'show' && @$cmd == 3;
+            return (0, '4242') if $cmd->[1] eq 'show';
+            return (0, 'Oct 02 01:00:00 host pvedaemon[300]: line') if $cmd->[0] eq 'journalctl';
+            return 0;
+        },
+    );
+
+    is_deeply(
+        PVE::InitSystem::Systemd::service_status('pve-guests'),
+        {
+            description => 'PVE guests',
+            load_state => 'loaded',
+            unit_state => 'enabled',
+            active_state => 'inactive',
+            sub_state => 'dead',
+            type => 'oneshot',
+            result => 'success',
+        },
+        'systemd status: systemctl show properties mapped',
+    );
+    is_deeply($calls->[-1], ['systemctl', 'show', 'pve-guests'], 'systemd status: command');
+
+    is(PVE::InitSystem::Systemd::service_main_pid('ceph-osd@1'), 4242, 'systemd main pid');
+
+    PVE::InitSystem::Systemd::try_reload_or_restart_service('pvedaemon.service', 'pveproxy.service');
+    is_deeply(
+        $calls->[-1],
+        ['systemctl', 'try-reload-or-restart', 'pvedaemon.service', 'pveproxy.service'],
+        'systemd try-reload-or-restart: one call for all services',
+    );
+
+    PVE::InitSystem::Systemd::disable_service('ceph-osd@1', runtime => 1);
+    is_deeply($calls->[-1], ['systemctl', 'disable', '--runtime', 'ceph-osd@1'], 'systemd disable --runtime');
+
+    PVE::InitSystem::Systemd::enable_service('ceph-mon@a');
+    is_deeply($calls->[-1], ['systemctl', 'enable', 'ceph-mon@a'], 'systemd enable');
+
+    my ($count, $lines) = PVE::InitSystem::Systemd::dump_syslog(0, 50, '2026-10-02', undef, 'sshd');
+    is_deeply(
+        $calls->[-1],
+        ['journalctl', '-o', 'short', '--no-pager', '--unit', 'ssh', '--since', '2026-10-02'],
+        'systemd syslog: journalctl with unit alias',
+    );
+    is_deeply([$count, $lines->[0]->{n}], [1, 1], 'systemd syslog: lines collected');
+}
+
+done_testing();

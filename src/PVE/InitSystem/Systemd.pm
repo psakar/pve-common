@@ -216,6 +216,119 @@ sub restart_service {
     run(['systemctl', $use_hup ? 'reload-or-restart' : 'restart', $name]);
 }
 
+sub reload_service {
+    my ($name) = @_;
+
+    run(['systemctl', 'reload', $name]);
+}
+
+# reload (or restart, if reload isn't supported) only if already running
+sub try_reload_or_restart_service {
+    my (@names) = @_;
+
+    run(['systemctl', 'try-reload-or-restart', @names]);
+}
+
+# $opts{runtime}: only enable/disable until the next reboot
+sub enable_service {
+    my ($name, %opts) = @_;
+
+    run(['systemctl', 'enable', $opts{runtime} ? ('--runtime') : (), $name]);
+}
+
+sub disable_service {
+    my ($name, %opts) = @_;
+
+    run(['systemctl', 'disable', $opts{runtime} ? ('--runtime') : (), $name]);
+}
+
+# Returns the state of a service as a hash with the keys:
+#   description  - human readable description, undef if the service doesn't exist
+#   load_state   - 'loaded' or 'not-found'
+#   unit_state   - e.g. 'enabled', 'disabled', 'static'
+#   active_state - e.g. 'active', 'inactive', 'failed'
+#   sub_state    - e.g. 'running', 'dead', 'exited'
+#   type         - e.g. 'simple', 'forking', 'oneshot' (if known)
+#   result       - result of the last run, e.g. 'success' (if known)
+sub service_status {
+    my ($name) = @_;
+
+    my $props = {};
+    run(
+        ['systemctl', 'show', $name],
+        outfunc => sub {
+            my ($line) = @_;
+            $props->{$1} = $2 if $line =~ m/^([^=\s]+)=(.*)$/;
+        },
+    );
+
+    return {
+        description => $props->{Description},
+        load_state => $props->{LoadState},
+        unit_state => $props->{UnitFileState},
+        active_state => $props->{ActiveState},
+        sub_state => $props->{SubState},
+        type => $props->{Type},
+        result => $props->{Result},
+    };
+}
+
+# Returns the main PID of a running service, or 0 if it's not running.
+sub service_main_pid {
+    my ($name) = @_;
+
+    my $pid = 0;
+    run(
+        ['systemctl', 'show', $name, '--property', 'MainPID', '--value'],
+        outfunc => sub { $pid = int($1) if $_[0] =~ m/^(\d+)$/ },
+    );
+
+    return $pid;
+}
+
+# some services log under a different unit than the name they're known by
+my $log_unit_aliases = {
+    postfix => 'postfix@-',
+    sshd => 'ssh',
+};
+
+# Returns ($count, $lines) for paging through the system log, in the same
+# format as PVE::Tools::dump_logfile.
+sub dump_syslog {
+    my ($start, $limit, $since, $until, $service) = @_;
+
+    my $lines = [];
+    my $count = 0;
+
+    $start = 0 if !$start;
+    $limit = 50 if !$limit;
+
+    my $parser = sub {
+        my $line = shift;
+
+        return if $count++ < $start;
+        return if $limit <= 0;
+        push @$lines, { n => int($count), t => $line };
+        $limit--;
+    };
+
+    my $cmd = ['journalctl', '-o', 'short', '--no-pager'];
+
+    push @$cmd, '--unit', $log_unit_aliases->{$service} // $service if $service;
+    push @$cmd, '--since', $since if $since;
+    push @$cmd, '--until', $until if $until;
+    run($cmd, outfunc => $parser);
+
+    # HACK: ExtJS store.guaranteeRange() does not like empty array
+    # so we add a line
+    if (!$count) {
+        $count++;
+        push @$lines, { n => $count, t => "no content" };
+    }
+
+    return ($count, $lines);
+}
+
 # Use systemds timedatectl for managing timezone settings
 sub get_timezone {
     my $timezone;
