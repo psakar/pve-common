@@ -87,6 +87,27 @@ my sub mock_run($module, $handler) {
     ok(!PVE::InitSystem::LSBService::started_by_init(), 'started_by_init: only once');
 }
 
+# --- LSBService: reload falls back to force-reload ---------------------------
+
+{
+    my $reload_rc;
+    my ($mock, $calls) = mock_run('PVE::InitSystem::LSBService',
+        sub ($cmd) { $cmd->[2] eq 'reload' ? $reload_rc : 0 });
+
+    $reload_rc = 0;
+    PVE::InitSystem::LSBService::reload_service('foo');
+    is_deeply($calls->[-1], ['service', 'foo', 'reload'], 'reload: supported');
+
+    $reload_rc = 3;
+    PVE::InitSystem::LSBService::reload_service('foo');
+    is_deeply([map { $_->[2] } $calls->@[-2, -1]], ['reload', 'force-reload'],
+        'reload: unimplemented (exit 3) falls back to force-reload');
+
+    $reload_rc = 1;
+    eval { PVE::InitSystem::LSBService::reload_service('foo') };
+    like($@, qr/reloading 'foo' failed: exit code 1/, 'reload: other failures are errors');
+}
+
 # --- LSBService: service_status --------------------------------------------
 
 {

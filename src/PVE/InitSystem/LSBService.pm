@@ -257,10 +257,20 @@ sub started_by_init {
     return 0;
 }
 
+# 'reload' is optional for init scripts, unlike 'force-reload' (reload if
+# supported, restart otherwise), so fall back to the latter if the script
+# reports it as unimplemented, LSB's exit code 3. E.g. Debian's dnsmasq script
+# has no 'reload', its systemd unit sends SIGHUP itself.
 sub reload_service {
     my ($name) = @_;
 
-    service_cmd($name, 'reload');
+    my $output = '';
+    my $collect = sub { $output .= "$_[0]\n" };
+    my $rc = service_cmd($name, 'reload', noerr => 1, outfunc => $collect, errfunc => $collect);
+    return if !$rc;
+    die "reloading '$name' failed: exit code $rc\n$output" if $rc != 3;
+
+    service_cmd($name, 'force-reload');
 }
 
 sub try_reload_or_restart_service {
