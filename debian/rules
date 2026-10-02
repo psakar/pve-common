@@ -22,3 +22,17 @@ endif
 
 %:
 	dh $@
+
+# The LSBService backend's boot-time start of enabled template service
+# instances (see PVE::InitSystem::LSBService), only needed without systemd;
+# not restarted on upgrades, which would restart all those instances.
+ifeq ($(PVE_INIT_SYSTEM),lsbservice)
+override_dh_installinit:
+	dh_installinit --name pve-service-instances --no-stop-on-upgrade --no-restart-after-upgrade --no-start
+
+override_dh_lintian:
+	dh_lintian
+	install -d debian/libpve-common-perl/usr/share/lintian/overrides
+	cat debian/libpve-common-perl.lintian-overrides.lsbservice \
+	    >>debian/libpve-common-perl/usr/share/lintian/overrides/libpve-common-perl
+endif

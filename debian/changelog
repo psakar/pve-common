@@ -16,6 +16,10 @@ libpve-common-perl (9.2.3) trixie; urgency=medium
   * add PVE::InitSystem mount functions, managing persistent mounts as
     systemd mount units or /etc/fstab entries, and runtime-only mounts
 
+  * LSBService: support template service instances (name@instance) of init
+    scripts taking the instance as argument, like dnsmasq's, started at
+    boot by the new pve-service-instances init script if enabled
+
   * daemon: recognize start/stop/restart commands run from LSB init
     scripts, which export PVE_INIT_SCRIPT=1
 

@@ -132,6 +132,42 @@ my sub init_script_name {
     return $service_aliases->{$name} // $name;
 }
 
+# Instances of template services (name@instance, as with systemd) map to the
+# 'name' init script, run directly with the instance as additional argument -
+# the convention Debian's dnsmasq init script follows (its dnsmasq@.service uses
+# the same mechanism). Enabled instances, which no runlevel link can represent,
+# are marked in $INSTANCE_ENABLED_DIR and started at boot by the
+# pve-service-instances init script, started ones in $INSTANCE_STARTED_DIR.
+our $INSTANCE_ENABLED_DIR = '/var/lib/pve-initsystem/enabled-instances';
+our $INSTANCE_STARTED_DIR = '/run/pve-initsystem/started-instances';
+
+# Returns (template script, instance) for a template instance, () otherwise.
+my sub instance_of {
+    my ($name) = @_;
+
+    $name =~ s/\.service$//;
+    return () if -e "$INITD_DIR/$name"; # a script of that very name
+    return () if $name !~ m/^([^@\/]+)@([^\/]*)$/;
+    return (init_script_name($1), $2);
+}
+
+my sub instance_markers {
+    my ($dir, $template) = @_;
+
+    return map { s{^.*/}{}r } glob("$dir/\Q$template\E\@*");
+}
+
+my sub set_instance_marker {
+    my ($dir, $marker, $set) = @_;
+
+    if ($set) {
+        make_path($dir);
+        file_set_contents("$dir/$marker", '');
+    } else {
+        unlink("$dir/$marker");
+    }
+}
+
 # LSB 'status' exit codes, see the LSB core spec's "Init Script Actions"
 my $lsb_status_states = {
     0 => ['active', 'running'],
@@ -142,6 +178,21 @@ my $lsb_status_states = {
 
 my sub service_cmd {
     my ($name, $action, %param) = @_;
+
+    if (my ($template, $instance) = instance_of($name)) {
+        # Directly instead of via service(8), which would record the template script
+        # itself as started or stopped for OpenRC; with the same clean environment.
+        my $rc = run(
+            ['env', '-i', 'PATH=/usr/sbin:/usr/bin:/sbin:/bin', "$INITD_DIR/$template", $action, $instance],
+            %param,
+        );
+        if ($action =~ m/^(?:start|restart|reload)$/ && !$rc) {
+            set_instance_marker($INSTANCE_STARTED_DIR, "$template\@$instance", 1);
+        } elsif ($action eq 'stop' && !$rc) {
+            set_instance_marker($INSTANCE_STARTED_DIR, "$template\@$instance", 0);
+        }
+        return $rc;
+    }
 
     return run(['service', init_script_name($name), $action], %param);
 }
@@ -159,8 +210,24 @@ sub start_service {
     service_cmd($name, 'start');
 }
 
+# Like systemctl, 'name@*' stops all instances of a template service, i.e. the
+# enabled and the started ones.
 sub stop_service {
     my ($name) = @_;
+
+    if ($name =~ m/^(.+)\@\*(?:\.service)?$/) {
+        my $template = init_script_name($1);
+        my %instances = map { $_ => 1 }
+            instance_markers($INSTANCE_ENABLED_DIR, $template),
+            instance_markers($INSTANCE_STARTED_DIR, $template);
+        my @errors;
+        for my $instance (sort keys %instances) {
+            eval { service_cmd($instance, 'stop') };
+            push @errors, $@ if $@;
+        }
+        die join('', @errors) if @errors;
+        return;
+    }
 
     service_cmd($name, 'stop');
 }
@@ -210,13 +277,28 @@ sub try_reload_or_restart_service {
 sub enable_service {
     my ($name, %opts) = @_;
 
+    if (my ($template, $instance) = instance_of($name)) {
+        die "init script '$template' for '$name' not found\n" if !-x "$INITD_DIR/$template";
+        set_instance_marker($INSTANCE_ENABLED_DIR, "$template\@$instance", 1);
+        return;
+    }
+
     my $script = init_script_name($name);
     run(['update-rc.d', $script, 'defaults']);
     run(['update-rc.d', $script, 'enable']);
 }
 
+# Like systemctl, 'name@' (an empty instance) disables all instances.
 sub disable_service {
     my ($name, %opts) = @_;
+
+    if (my ($template, $instance) = instance_of($name)) {
+        my @instances = length($instance)
+            ? ("$template\@$instance")
+            : instance_markers($INSTANCE_ENABLED_DIR, $template);
+        set_instance_marker($INSTANCE_ENABLED_DIR, $_, 0) for @instances;
+        return;
+    }
 
     run(['update-rc.d', init_script_name($name), 'disable']);
 }
@@ -242,7 +324,8 @@ my sub service_enabled {
 sub service_status {
     my ($name) = @_;
 
-    my $script = init_script_name($name);
+    my ($template, $instance) = instance_of($name);
+    my $script = $template // init_script_name($name);
     my $path = "$INITD_DIR/$script";
 
     if (!-x $path) {
@@ -264,7 +347,11 @@ sub service_status {
         description => lsb_header_field($path, 'Short-Description')
             // lsb_header_field($path, 'Description') // $script,
         load_state => 'loaded',
-        unit_state => service_enabled($script) ? 'enabled' : 'disabled',
+        unit_state => (
+            defined($template)
+                ? -e "$INSTANCE_ENABLED_DIR/$template\@$instance"
+                : service_enabled($script)
+        ) ? 'enabled' : 'disabled',
         active_state => $active_state,
         sub_state => $sub_state,
         type => undef,

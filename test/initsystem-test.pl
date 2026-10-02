@@ -130,6 +130,71 @@ my sub mock_run($module, $handler) {
     is(scalar(@$calls), $calls_before, 'status: missing script is not run');
 }
 
+# --- LSBService: template service instances --------------------------------
+
+{
+    local $PVE::InitSystem::LSBService::INITD_DIR = "$test_dir/init.d-tmpl";
+    local $PVE::InitSystem::LSBService::INSTANCE_ENABLED_DIR = "$test_dir/enabled-instances";
+    local $PVE::InitSystem::LSBService::INSTANCE_STARTED_DIR = "$test_dir/started-instances";
+    make_path("$test_dir/init.d-tmpl");
+    file_set_contents("$test_dir/init.d-tmpl/dnsmasq",
+        "#!/bin/sh\n### BEGIN INIT INFO\n# Provides: dnsmasq\n# Short-Description: dnsmasq - A lightweight DHCP server\n### END INIT INFO\n");
+    chmod(0755, "$test_dir/init.d-tmpl/dnsmasq");
+
+    my $running = {};
+    my ($mock, $calls) = mock_run(
+        'PVE::InitSystem::LSBService',
+        sub ($cmd) {
+            my ($action, $instance) = $cmd->[0] eq 'env' ? $cmd->@[4, 5] : $cmd->@[2, 3];
+            return ($running->{$instance // ''} ? 0 : 3) if $action eq 'status';
+            $running->{$instance} = 1 if $action =~ m/^(?:start|restart)$/;
+            delete $running->{$instance} if $action eq 'stop';
+            return 0;
+        },
+    );
+    my sub markers($kind) { [map { s{^.*/}{}r } sort glob("$test_dir/$kind-instances/*")] }
+
+    PVE::InitSystem::LSBService::restart_service('dnsmasq@zone1');
+    is_deeply(
+        $calls->[-1],
+        ['env', '-i', 'PATH=/usr/sbin:/usr/bin:/sbin:/bin', "$test_dir/init.d-tmpl/dnsmasq", 'restart', 'zone1'],
+        'instance: template script run directly with instance argument',
+    );
+    is_deeply(markers('started'), ['dnsmasq@zone1'], 'instance: marked as started');
+
+    PVE::InitSystem::LSBService::enable_service('dnsmasq@zone1.service');
+    PVE::InitSystem::LSBService::enable_service('dnsmasq@zone2');
+    is_deeply(markers('enabled'), ['dnsmasq@zone1', 'dnsmasq@zone2'], 'instance: enabled via markers, not update-rc.d');
+    ok(!grep({ $_->[0] eq 'update-rc.d' } @$calls), 'instance: no update-rc.d');
+
+    my $st = PVE::InitSystem::LSBService::service_status('dnsmasq@zone1');
+    is_deeply([$st->@{qw(load_state unit_state active_state)}], ['loaded', 'enabled', 'active'], 'instance: status');
+    is($st->{description}, 'dnsmasq - A lightweight DHCP server', 'instance: description of the template');
+    is(PVE::InitSystem::LSBService::service_status('dnsmasq@zone2')->{active_state}, 'inactive', 'instance: other one stopped');
+    is(PVE::InitSystem::LSBService::service_status('missing@x')->{load_state}, 'not-found', 'instance: unknown template');
+
+    @$calls = ();
+    PVE::InitSystem::LSBService::stop_service('dnsmasq@*');
+    is_deeply(
+        [sort map { join(' ', $_->@[-2, -1]) } @$calls],
+        ['stop zone1', 'stop zone2'],
+        'instance: stopping name@* stops the enabled and started instances',
+    );
+    is_deeply(markers('started'), [], 'instance: started markers removed');
+
+    PVE::InitSystem::LSBService::disable_service('dnsmasq@');
+    is_deeply(markers('enabled'), [], 'instance: disabling name@ disables all instances');
+
+    eval { PVE::InitSystem::LSBService::enable_service('missing@x') };
+    like($@, qr/init script 'missing' for 'missing\@x' not found/, 'instance: enabling with unknown template fails');
+
+    # a script whose name contains an @ itself isn't treated as an instance
+    file_set_contents("$test_dir/init.d-tmpl/odd\@name", "#!/bin/sh\n");
+    chmod(0755, "$test_dir/init.d-tmpl/odd\@name");
+    PVE::InitSystem::LSBService::start_service('odd@name');
+    is_deeply($calls->[-1], ['service', 'odd@name', 'start'], 'instance: existing script named with @ is used as is');
+}
+
 # --- LSBService: scope placement (fake cgroupfs) ---------------------------
 
 {
