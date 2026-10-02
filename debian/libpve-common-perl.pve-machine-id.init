@@ -1,0 +1,77 @@
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          pve-machine-id
+# Required-Start:    $remote_fs
+# Required-Stop:
+# X-Start-Before:    dbus
+# Default-Start:     S
+# Default-Stop:
+# Short-Description: Create /etc/machine-id if it's missing
+### END INIT INFO
+
+# Only installed by the pkg.pve-common.lsbservice build (see debian/rules).
+# With systemd, systemd creates /etc/machine-id; without it, e.g. on Devuan,
+# nothing does. libsystemd's machine ID functions need it though, e.g. for the
+# subscription's server ID (proxmox-subscription in libpve-rs-perl), which
+# otherwise falls back to the SSH host key's fingerprint.
+#
+# Create it from D-Bus's machine ID if there is one, so that both agree, or
+# from random bytes otherwise, and let D-Bus use it too if it has none yet, as
+# on systemd systems. An existing non-empty /etc/machine-id is never touched:
+# the IDs derived from it must not change.
+
+. /lib/lsb/init-functions
+
+MACHINE_ID=/etc/machine-id
+DBUS_MACHINE_ID=/var/lib/dbus/machine-id
+
+# 32 lowercase hexadecimal digits, see machine-id(5)
+valid_id() {
+    [ "${#1}" -eq 32 ] && [ -z "$(printf '%s' "$1" | tr -d '0-9a-f')" ]
+}
+
+create_machine_id() {
+    id=
+    if [ -r "$DBUS_MACHINE_ID" ]; then
+        id=$(head -n 1 "$DBUS_MACHINE_ID")
+        valid_id "$id" || id=
+    fi
+    if [ -z "$id" ]; then
+        id=$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n')
+    fi
+    valid_id "$id" || return 1
+
+    tmp=$(mktemp "$MACHINE_ID.XXXXXX") || return 1
+    if printf '%s\n' "$id" >"$tmp" && chmod 0444 "$tmp" && mv "$tmp" "$MACHINE_ID"; then
+        return 0
+    fi
+    rm -f "$tmp"
+    return 1
+}
+
+case "$1" in
+    start|restart|force-reload)
+        if [ ! -s "$MACHINE_ID" ]; then
+            log_action_begin_msg "Creating $MACHINE_ID"
+            create_machine_id
+            status=$?
+            log_action_end_msg $status
+            [ $status -eq 0 ] || exit $status
+        fi
+        if [ -d "${DBUS_MACHINE_ID%/*}" ] && [ ! -e "$DBUS_MACHINE_ID" ] && [ ! -L "$DBUS_MACHINE_ID" ]; then
+            ln -s "$MACHINE_ID" "$DBUS_MACHINE_ID"
+        fi
+        ;;
+    stop)
+        ;;
+    status)
+        [ -s "$MACHINE_ID" ] && exit 0
+        exit 3
+        ;;
+    *)
+        echo "Usage: /etc/init.d/pve-machine-id {start|stop|restart|force-reload|status}" >&2
+        exit 3
+        ;;
+esac
+
+exit 0
