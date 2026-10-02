@@ -142,6 +142,33 @@ sub enter_systemd_scope {
     );
 }
 
+# Change resource properties of a running scope, with the same names and units
+# as enter_systemd_scope: CPUQuota (percent of one CPU), CPUWeight (cgroup v2)
+# and CPUShares (cgroup v1). An undef value resets it to the default.
+sub set_scope_properties {
+    my ($unit, %props) = @_;
+
+    my $properties = [];
+    for my $key (sort keys %props) {
+        my $value = $props{$key};
+        if ($key eq 'CPUQuota') {
+            push @$properties,
+                ['CPUQuotaPerSecUSec', dbus_uint64(defined($value) ? $value * 10_000 : -1)];
+        } elsif ($key eq 'CPUWeight' || $key eq 'CPUShares') {
+            push @$properties, [$key, dbus_uint64($value // -1)];
+        } else {
+            die "Don't know how to encode $key for systemd scope\n";
+        }
+    }
+
+    systemd_call(sub {
+        my ($if, $reactor, $finish_cb) = @_;
+        # runtime only, like the transient scope itself
+        $if->SetUnitProperties($unit, dbus_boolean(1), $properties);
+        return 1;
+    });
+}
+
 sub wait_for_unit_removed($;$) {
     my ($unit, $timeout) = @_;
 

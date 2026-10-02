@@ -24,6 +24,7 @@ require "$backend_path.pm";
 
 my @interface = qw(
     enter_systemd_scope
+    set_scope_properties
     wait_for_unit_removed
     is_unit_active
     start_service
