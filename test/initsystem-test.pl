@@ -195,6 +195,75 @@ my sub mock_run($module, $handler) {
     is(PVE::InitSystem::LSBService::reset_failed('100.scope'), undef, 'reset_failed: nothing to do');
 }
 
+# --- LSBService: mounts in a fake fstab --------------------------------------
+
+{
+    my $fstab = "$test_dir/fstab";
+    local $PVE::InitSystem::LSBService::FSTAB = $fstab;
+    local $PVE::InitSystem::LSBService::FSTAB_LOCK = "$test_dir/fstab.lck";
+    my $user_lines = "# /etc/fstab: static file system information.\nUUID=1234 / ext4 errors=remount-ro 0 1\n";
+    file_set_contents($fstab, $user_lines);
+
+    my ($mock, $calls) = mock_run('PVE::InitSystem::LSBService', sub ($cmd) { 0 });
+
+    my $config = PVE::InitSystem::LSBService::create_mount(
+        where => "$test_dir/mnt/pve/store 1",
+        what => '/dev/disk/by-uuid/abcd',
+        type => 'ext4',
+        options => 'defaults',
+        description => "Mount storage 'store 1' under /mnt/pve",
+    );
+    is($config, $fstab, 'mount: config is the fstab');
+    is(
+        PVE::File::file_get_contents($fstab),
+        $user_lines
+            . "# Mount storage 'store 1' under /mnt/pve (added by Proxmox VE)\n"
+            . "/dev/disk/by-uuid/abcd $test_dir/mnt/pve/store\\0401 ext4 defaults 0 2\n",
+        'mount: entry appended with marker comment, space escaped',
+    );
+    ok(-d "$test_dir/mnt/pve/store 1", 'mount: mount point created');
+    is_deeply($calls->[-1], ['mount', "$test_dir/mnt/pve/store 1"], 'mount: mounted right away');
+
+    eval {
+        PVE::InitSystem::LSBService::create_mount(
+            where => "$test_dir/mnt/pve/store 1", what => '/dev/x', type => 'ext4',
+            options => 'defaults', description => 'dup');
+    };
+    like($@, qr/a mount for .* already exists/, 'mount: duplicate rejected');
+
+    is_deeply(
+        PVE::InitSystem::LSBService::get_mount("$test_dir/mnt/pve/store 1"),
+        {
+            where => "$test_dir/mnt/pve/store 1",
+            what => '/dev/disk/by-uuid/abcd',
+            type => 'ext4',
+            options => 'defaults',
+            config => $fstab,
+        },
+        'mount: get_mount unescapes',
+    );
+    is(PVE::InitSystem::LSBService::get_mount("$test_dir/mnt/pve/none"), undef, 'mount: get_mount of unknown');
+    is_deeply(
+        [map { $_->{where} } PVE::InitSystem::LSBService::list_mounts("$test_dir/mnt/pve/")->@*],
+        ["$test_dir/mnt/pve/store 1"],
+        'mount: list_mounts only below the prefix',
+    );
+
+    my $procfs_mock = Test::MockModule->new('PVE::ProcFSTools');
+    $procfs_mock->redefine(parse_proc_mounts => sub { [['/dev/sdb1', "$test_dir/mnt/pve/store 1", 'ext4']] });
+    PVE::InitSystem::LSBService::remove_mount("$test_dir/mnt/pve/store 1");
+    is_deeply($calls->[-1], ['umount', "$test_dir/mnt/pve/store 1"], 'mount: removal unmounts if mounted');
+    is(PVE::File::file_get_contents($fstab), $user_lines, 'mount: entry and marker removed, rest untouched');
+
+    PVE::InitSystem::LSBService::mount_runtime("$test_dir/mnt/cephfs", 'fuse.ceph', 'mon1:/', 'ceph.id=admin');
+    is_deeply(
+        $calls->[-1],
+        ['mount', '-t', 'fuse.ceph', '-o', 'ceph.id=admin', 'mon1:/', "$test_dir/mnt/cephfs"],
+        'mount: runtime mount is a plain mount',
+    );
+    ok(-d "$test_dir/mnt/cephfs", 'mount: runtime mount point created');
+}
+
 # --- LSBService: dump_syslog -----------------------------------------------
 
 {
@@ -354,6 +423,55 @@ SKIP: {
     PVE::InitSystem::Systemd::set_scope_properties('100.scope', CPUQuota => undef, CPUShares => undef);
     is_deeply(props($set_calls[-1]), { CPUQuotaPerSecUSec => -1, CPUShares => -1 },
         'systemd set properties: undef resets (-1, i.e. infinity)');
+}
+
+# --- Systemd: mounts as mount units ------------------------------------------
+
+SKIP: {
+    skip 'Net::DBus not available, skipping systemd mount tests', 6
+        if !eval { require PVE::InitSystem::Systemd; 1 };
+
+    local $PVE::InitSystem::Systemd::UNIT_DIR = "$test_dir/units";
+    local $PVE::InitSystem::Systemd::RUNTIME_UNIT_DIR = "$test_dir/run-units";
+    make_path("$test_dir/units", "$test_dir/run-units");
+    my ($mock, $calls) = mock_run('PVE::InitSystem::Systemd', sub ($cmd) { 0 });
+
+    my $config = PVE::InitSystem::Systemd::create_mount(
+        where => '/mnt/pve/store1',
+        what => '/dev/disk/by-uuid/abcd',
+        type => 'ext4',
+        options => 'defaults',
+        description => "Mount storage 'store1' under /mnt/pve",
+    );
+    is($config, "$test_dir/units/mnt-pve-store1.mount", 'systemd mount: unit path');
+    # exactly what pve-storage's directory storage creation wrote itself
+    is(
+        PVE::File::file_get_contents($config),
+        "[Install]\nWantedBy=multi-user.target\n\n"
+            . "[Mount]\nOptions=defaults\nType=ext4\nWhat=/dev/disk/by-uuid/abcd\nWhere=/mnt/pve/store1\n\n"
+            . "[Unit]\nDescription=Mount storage 'store1' under /mnt/pve\n\n",
+        'systemd mount: unit content',
+    );
+    is_deeply(
+        [$calls->@[-3 .. -1]],
+        [['systemctl', 'daemon-reload'], ['systemctl', 'enable', 'mnt-pve-store1.mount'],
+            ['systemctl', 'start', 'mnt-pve-store1.mount']],
+        'systemd mount: reload, enable, start',
+    );
+    is_deeply(
+        PVE::InitSystem::Systemd::list_mounts('/mnt/pve/'),
+        [{ where => '/mnt/pve/store1', what => '/dev/disk/by-uuid/abcd', type => 'ext4',
+            options => 'defaults', config => $config }],
+        'systemd mount: listed',
+    );
+
+    PVE::InitSystem::Systemd::remove_mount('/mnt/pve/store1');
+    ok(!-e $config, 'systemd mount: unit removed');
+    is_deeply(
+        [$calls->@[-2 .. -1]],
+        [['systemctl', 'stop', 'mnt-pve-store1.mount'], ['systemctl', 'disable', 'mnt-pve-store1.mount']],
+        'systemd mount: stopped and disabled',
+    );
 }
 
 # --- PVE::Systemd compatibility wrappers pass their arguments on -------------

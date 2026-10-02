@@ -541,6 +541,134 @@ sub is_unit_active($;$) {
 # The /etc/localtime symlink is authoritative (it's also what timedatectl reads
 # in the systemd backend). /etc/timezone is only a fallback: tzdata stopped
 # shipping it with Debian 13 trixie (and thus Devuan 6 excalibur).
+# Mounts: persistent ones are /etc/fstab entries, mounted at boot by the init
+# scripts (mountall.sh, mountnfs.sh), runtime-only ones plain mounts. Package
+# variables, so that tests can point them elsewhere.
+our $FSTAB = '/etc/fstab';
+our $FSTAB_LOCK = '/run/lock/pve-fstab.lck';
+my $FSTAB_MARKER = 'added by Proxmox VE';
+
+my sub fstab_escape {
+    my ($value) = @_;
+
+    $value =~ s/([\s\\])/sprintf('\\%03o', ord($1))/ge;
+    return $value;
+}
+
+my sub fstab_unescape {
+    my ($value) = @_;
+
+    $value =~ s/\\([0-7]{3})/chr(oct($1))/ge;
+    return $value;
+}
+
+# The fstab's lines, with each entry's fields parsed.
+my sub read_fstab {
+    my $content = eval { file_get_contents($FSTAB) } // '';
+
+    my @lines;
+    for my $line (split(/\n/, $content)) {
+        my $entry;
+        if ($line !~ m/^\s*(?:#|$)/) {
+            my ($what, $where, $type, $options) = split(/\s+/, $line =~ s/^\s+//r);
+            $entry = {
+                what => fstab_unescape($what),
+                where => fstab_unescape($where // ''),
+                type => $type,
+                options => $options,
+                config => $FSTAB,
+            };
+        }
+        push @lines, { line => $line, entry => $entry };
+    }
+
+    return \@lines;
+}
+
+my sub lock_fstab {
+    my ($code) = @_;
+
+    PVE::Tools::lock_file($FSTAB_LOCK, 10, $code);
+    die $@ if $@;
+}
+
+# See PVE::InitSystem::Systemd::create_mount. Adds an fstab entry, with a comment
+# marking it as ours, and mounts it.
+sub create_mount {
+    my (%param) = @_;
+
+    my $where = $param{where};
+
+    lock_fstab(sub {
+        die "a mount for '$where' already exists in $FSTAB\n"
+            if grep { $_->{entry} && $_->{entry}->{where} eq $where } read_fstab()->@*;
+
+        my $content = eval { file_get_contents($FSTAB) } // '';
+        $content .= "\n" if length($content) && $content !~ m/\n$/;
+        $content .= "# $param{description} ($FSTAB_MARKER)\n";
+        # pass 2: fsck'd at boot after the root file system
+        $content .= join(' ',
+            fstab_escape($param{what}), fstab_escape($where),
+            $param{type}, $param{options} || 'defaults', 0, 2) . "\n";
+        file_set_contents($FSTAB, $content);
+    });
+
+    make_path($where);
+    run(['mount', $where]);
+
+    return $FSTAB;
+}
+
+sub get_mount {
+    my ($where) = @_;
+
+    my ($found) = grep { $_->{entry} && $_->{entry}->{where} eq $where } read_fstab()->@*;
+    return $found ? $found->{entry} : undef;
+}
+
+sub list_mounts {
+    my ($prefix) = @_;
+
+    return [
+        map { $_->{entry} }
+        grep { $_->{entry} && $_->{entry}->{where} =~ m/^\Q$prefix\E/ } read_fstab()->@*
+    ];
+}
+
+# See PVE::InitSystem::Systemd::remove_mount. Unmounts it if mounted, and
+# removes the fstab entry together with our marker comment above it.
+sub remove_mount {
+    my ($where) = @_;
+
+    my $mounts = PVE::ProcFSTools::parse_proc_mounts();
+    run(['umount', $where]) if grep { $_->[1] eq $where } @$mounts;
+
+    lock_fstab(sub {
+        my $lines = read_fstab();
+        my @keep;
+        for my $line (@$lines) {
+            if ($line->{entry} && $line->{entry}->{where} eq $where) {
+                pop @keep if @keep && $keep[-1] =~ m/^#.*\(\Q$FSTAB_MARKER\E\)$/;
+                next;
+            }
+            push @keep, $line->{line};
+        }
+        file_set_contents($FSTAB, join('', map { "$_\n" } @keep));
+    });
+
+    return;
+}
+
+# See PVE::InitSystem::Systemd::mount_runtime. A plain mount here, as there is
+# no shutdown ordering to take care of.
+sub mount_runtime {
+    my ($where, $type, $what, $options) = @_;
+
+    make_path($where);
+    run(['mount', '-t', $type, length($options // '') ? ('-o', $options) : (), $what, $where],
+        errmsg => "mount error");
+}
+
 sub get_timezone {
     if (defined(my $target = readlink('/etc/localtime'))) {
         return $1 if $target =~ m{(?:^|/)zoneinfo/(.+)$};

@@ -13,6 +13,9 @@ libpve-common-perl (9.2.3) trixie; urgency=medium
     and weight of a running scope, e.g. a VM's, and stop_scope and
     reset_failed for cleaning up a scope
 
+  * add PVE::InitSystem mount functions, managing persistent mounts as
+    systemd mount units or /etc/fstab entries, and runtime-only mounts
+
   * daemon: recognize start/stop/restart commands run from LSB init
     scripts, which export PVE_INIT_SCRIPT=1
 
