@@ -16,6 +16,7 @@ use Net::DBus::Reactor;
 
 use PVE::Cmd qw(run);
 use PVE::Exception qw(raise_param_exc);
+use PVE::File qw(file_set_contents);
 
 # $code should take the parameters ($interface, $reactor, $finish_callback).
 #
@@ -380,6 +381,136 @@ sub dump_syslog {
     }
 
     return ($count, $lines);
+}
+
+# Mounts are mount units: persistent ones in $UNIT_DIR, enabled for boot,
+# runtime-only ones in $RUNTIME_UNIT_DIR. Package variables so that tests can
+# point them elsewhere.
+our $UNIT_DIR = '/etc/systemd/system';
+our $RUNTIME_UNIT_DIR = '/run/systemd/system';
+
+my sub mount_unit_name {
+    my ($where) = @_;
+
+    require PVE::Systemd; # uses PVE::InitSystem itself
+    return PVE::Systemd::escape_unit($where, 1) . '.mount';
+}
+
+my sub mount_from_unit {
+    my ($path) = @_;
+
+    require PVE::Systemd;
+    my $mount = PVE::Systemd::read_ini($path)->{Mount} // {};
+    return {
+        where => $mount->{Where},
+        what => $mount->{What},
+        type => $mount->{Type},
+        options => $mount->{Options},
+        config => $path,
+    };
+}
+
+# Create a persistent mount, mounted at boot and right away. Returns the path of
+# its configuration, here the mount unit.
+sub create_mount {
+    my (%param) = @_;
+
+    my $unit = mount_unit_name($param{where});
+    my $path = "$UNIT_DIR/$unit";
+    die "a systemd mount unit already exists: $path\n" if -e $path;
+
+    require PVE::Systemd;
+    PVE::Systemd::write_ini(
+        {
+            Unit => { Description => $param{description} },
+            Install => { WantedBy => 'multi-user.target' },
+            Mount => {
+                What => $param{what},
+                Where => $param{where},
+                Type => $param{type},
+                Options => $param{options},
+            },
+        },
+        $path,
+    );
+
+    run(['systemctl', 'daemon-reload']);
+    run(['systemctl', 'enable', $unit]);
+    run(['systemctl', 'start', $unit]);
+
+    return $path;
+}
+
+# Returns the persistent mount at $where (where, what, type, options and the
+# config path), or undef if there is none.
+sub get_mount {
+    my ($where) = @_;
+
+    my $path = "$UNIT_DIR/" . mount_unit_name($where);
+    return undef if !-e $path;
+    return mount_from_unit($path);
+}
+
+# Returns all persistent mounts below $prefix, like get_mount.
+sub list_mounts {
+    my ($prefix) = @_;
+
+    my @mounts;
+    for my $path (sort glob("$UNIT_DIR/*.mount")) {
+        my $mount = mount_from_unit($path);
+        push @mounts, $mount
+            if defined($mount->{where}) && $mount->{where} =~ m/^\Q$prefix\E/;
+    }
+
+    return \@mounts;
+}
+
+# Unmount and remove a persistent mount.
+sub remove_mount {
+    my ($where) = @_;
+
+    my $unit = mount_unit_name($where);
+    my $path = "$UNIT_DIR/$unit";
+
+    run(['systemctl', 'stop', $unit]);
+    run(['systemctl', 'disable', $unit]);
+
+    unlink($path) or $!{ENOENT} or die "cannot remove $path - $!\n";
+
+    return;
+}
+
+# Mount until the next reboot, as a runtime mount unit without default
+# dependencies: network file systems need _netdev-like ordering, without the
+# shutdown ordering cycles systemd's generator would produce for fuse mounts.
+sub mount_runtime {
+    my ($where, $type, $what, $options) = @_;
+
+    my $unit = <<"EOF";
+[Unit]
+Description=${where}
+DefaultDependencies=no
+Requires=system.slice
+Wants=network-online.target
+Before=umount.target remote-fs.target
+After=systemd-journald.socket system.slice network.target -.mount remote-fs-pre.target network-online.target
+Conflicts=umount.target
+
+[Mount]
+Where=${where}
+What=${what}
+Type=${type}
+Options=${options}
+EOF
+
+    my $unit_fn = mount_unit_name($where);
+    my $unit_path = "$RUNTIME_UNIT_DIR/$unit_fn";
+    my $daemon_needs_reload = -e $unit_path;
+    file_set_contents($unit_path, $unit);
+
+    run(['systemctl', 'daemon-reload'], errmsg => "daemon-reload error")
+        if $daemon_needs_reload;
+    run(['systemctl', 'start', $unit_fn], errmsg => "mount error");
 }
 
 # Use systemds timedatectl for managing timezone settings

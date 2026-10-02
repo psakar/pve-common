@@ -27,6 +27,11 @@ my @interface = qw(
     set_scope_properties
     stop_scope
     reset_failed
+    create_mount
+    get_mount
+    list_mounts
+    remove_mount
+    mount_runtime
     wait_for_unit_removed
     is_unit_active
     start_service
