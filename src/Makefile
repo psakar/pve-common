@@ -15,7 +15,7 @@ PVE_INIT_SYSTEM ?= systemd
 ifeq ($(PVE_INIT_SYSTEM),systemd)
 INIT_SYSTEM_BACKEND = Systemd
 else ifeq ($(PVE_INIT_SYSTEM),sysvinit)
-INIT_SYSTEM_BACKEND = SysVInit
+INIT_SYSTEM_BACKEND = LSBService
 else
 $(error unsupported PVE_INIT_SYSTEM '$(PVE_INIT_SYSTEM)' (expected 'systemd' or 'sysvinit'))
 endif

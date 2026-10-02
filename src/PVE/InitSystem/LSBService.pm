@@ -1,10 +1,13 @@
-package PVE::InitSystem::SysVInit;
+package PVE::InitSystem::LSBService;
 
-# sysvinit backend for PVE::InitSystem - manages services via the
-# distribution-neutral `service` wrapper, and places/tracks resource scopes
-# by manipulating cgroupv2 directly instead of asking systemd to do it (there
-# is no sysvinit equivalent of systemd's transient scope units or of waiting
-# on D-Bus job-completion signals).
+# LSB/service(8) backend for PVE::InitSystem - manages services via the
+# distribution-neutral `service` wrapper (which itself dispatches to
+# sysvinit, OpenRC, or whatever else provides an LSB-style /etc/init.d
+# interface - this backend is not specific to sysvinit), and places/tracks
+# resource scopes by manipulating cgroupv2 directly instead of asking
+# systemd to do it (none of these init systems have an equivalent of
+# systemd's transient scope units or of waiting on D-Bus job-completion
+# signals).
 #
 # Resource scopes are therefore a best-effort approximation of the systemd
 # backend's enter_systemd_scope/wait_for_unit_removed/is_unit_active (names
@@ -40,7 +43,7 @@ use constant ZONEINFO_DIR => '/usr/share/zoneinfo';
 my sub scope_cgroup_path {
     my ($unit) = @_;
 
-    die "resource scopes under the sysvinit backend require cgroupv2\n"
+    die "resource scopes under the LSBService backend require cgroupv2\n"
         if PVE::CGroup::cgroup_mode() != 2;
 
     return PVE::CGroup::cgroupv2_base_path() . '/' . SCOPE_PARENT_SLICE . "/$unit";
@@ -96,7 +99,7 @@ sub enter_systemd_scope {
 
     if (%extra) {
         die "don't know how to apply " . join(', ', sort keys %extra)
-            . " for a sysvinit resource scope\n";
+            . " for an LSBService resource scope\n";
     }
 
     return 1;
