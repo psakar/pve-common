@@ -142,6 +142,18 @@ sub restart_service {
     service_cmd($name, 'restart');
 }
 
+# Whether we were run by the init system itself rather than by a user or another
+# service. Unlike systemd, init scripts run the daemon from their own shell, so
+# they mark that in the environment: PVE daemons' init scripts have to
+# 'export PVE_INIT_SCRIPT=1' before running '<daemon> start|stop|restart',
+# otherwise these would ask the init system to do it, i.e. run the init script
+# again. The marker is consumed, so the daemon's own children don't inherit it.
+sub started_by_init {
+    return 1 if getppid() == 1;
+    return 1 if delete($ENV{PVE_INIT_SCRIPT});
+    return 0;
+}
+
 sub reload_service {
     my ($name) = @_;
 

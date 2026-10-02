@@ -29,6 +29,7 @@ my @interface = qw(
     start_service
     stop_service
     restart_service
+    started_by_init
     reload_service
     try_reload_or_restart_service
     enable_service

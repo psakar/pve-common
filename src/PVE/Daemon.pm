@@ -569,13 +569,11 @@ my $read_pid = sub {
     return $pid;
 };
 
-# checks if the process was started by systemd
+# checks if the daemon command was run by the init system (e.g. systemd's
+# ExecStart=, or an LSB init script), and thus has to act directly instead of
+# asking the init system to do it
 my $init_ppid = sub {
-    if (getppid() == 1) {
-        return 1;
-    } else {
-        return 0;
-    }
+    return PVE::InitSystem::started_by_init() ? 1 : 0;
 };
 
 sub running {
