@@ -9,6 +9,9 @@ libpve-common-perl (9.2.3) trixie; urgency=medium
     build time; build with the pkg.pve-common.lsbservice profile for
     systemd-free derivatives like Devuan
 
+  * add PVE::InitSystem::set_scope_properties for changing the CPU limit
+    and weight of a running scope, e.g. a VM's
+
   * daemon: recognize start/stop/restart commands run from LSB init
     scripts, which export PVE_INIT_SCRIPT=1
 

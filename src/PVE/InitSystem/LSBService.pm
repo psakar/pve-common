@@ -426,6 +426,34 @@ sub enter_systemd_scope {
     return 1;
 }
 
+# See PVE::InitSystem::Systemd::set_scope_properties. Like enter_systemd_scope,
+# only CPUQuota and CPUWeight, written to the scope's cgroup v2 interface files;
+# undef resets to the kernel's defaults (no limit, weight 100), which are
+# systemd's defaults too.
+sub set_scope_properties {
+    my ($unit, %props) = @_;
+
+    for my $key (sort keys %props) {
+        die "don't know how to apply $key for an LSBService resource scope\n"
+            if $key ne 'CPUQuota' && $key ne 'CPUWeight';
+    }
+
+    my $path = find_scope_path($unit) // die "resource scope '$unit' not found\n";
+
+    if (exists($props{CPUQuota})) {
+        my $quota = $props{CPUQuota};
+        my $period = 100_000; # 100ms, as in enter_systemd_scope
+        my $max = defined($quota) ? int($quota * $period / 100) : 'max';
+        PVE::ProcFSTools::write_proc_entry("$path/cpu.max", "$max $period");
+    }
+
+    if (exists($props{CPUWeight})) {
+        PVE::ProcFSTools::write_proc_entry("$path/cpu.weight", $props{CPUWeight} // 100);
+    }
+
+    return;
+}
+
 sub wait_for_unit_removed($;$) {
     my ($unit, $timeout) = @_;
 

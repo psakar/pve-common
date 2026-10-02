@@ -173,6 +173,23 @@ my sub mock_run($module, $handler) {
     ok(!PVE::InitSystem::LSBService::is_unit_active('300.scope'), 'scope: found in nested slice, inactive');
     ok(!PVE::InitSystem::LSBService::is_unit_active('999.scope'), 'scope: unknown scope inactive');
     ok(PVE::InitSystem::LSBService::wait_for_unit_removed('999.scope', 1), 'scope: unknown scope counts as removed');
+
+    my $scope = "$cg/qemu.slice/100.scope";
+    my sub cat($file) { PVE::File::file_get_contents("$scope/$file") }
+    PVE::InitSystem::LSBService::set_scope_properties('100.scope', CPUQuota => 250, CPUWeight => 300);
+    is(cat('cpu.max'), '250000 100000', 'set properties: CPUQuota');
+    is(cat('cpu.weight'), '300', 'set properties: CPUWeight');
+    PVE::InitSystem::LSBService::set_scope_properties('100.scope', CPUQuota => undef);
+    is(cat('cpu.max'), 'max 100000', 'set properties: CPUQuota undef removes the limit');
+    is(cat('cpu.weight'), '300', 'set properties: properties not passed stay');
+    PVE::InitSystem::LSBService::set_scope_properties('100.scope', CPUWeight => undef);
+    is(cat('cpu.weight'), '100', 'set properties: CPUWeight undef resets to default');
+
+    eval { PVE::InitSystem::LSBService::set_scope_properties('100.scope', CPUWeight => 50, CPUShares => 10) };
+    like($@, qr/don't know how to apply CPUShares/, 'set properties: CPUShares rejected');
+    is(cat('cpu.weight'), '100', 'set properties: nothing written when rejecting');
+    eval { PVE::InitSystem::LSBService::set_scope_properties('999.scope', CPUWeight => 50) };
+    like($@, qr/resource scope '999.scope' not found/, 'set properties: unknown scope');
 }
 
 # --- LSBService: dump_syslog -----------------------------------------------
@@ -292,6 +309,37 @@ SKIP: {
         'systemd syslog: journalctl with unit alias',
     );
     is_deeply([$count, $lines->[0]->{n}], [1, 1], 'systemd syslog: lines collected');
+}
+
+# --- Systemd: set_scope_properties ------------------------------------------
+
+SKIP: {
+    skip 'Net::DBus not available, skipping systemd set_scope_properties tests', 4
+        if !eval { require PVE::InitSystem::Systemd; 1 };
+
+    my @set_calls;
+    my $mock = Test::MockModule->new('PVE::InitSystem::Systemd');
+    $mock->redefine(
+        systemd_call => sub ($code, $timeout = undef) {
+            my $if = bless {}, 'FakeSystemdManager';
+            no strict 'refs';
+            *{'FakeSystemdManager::SetUnitProperties'} = sub ($self, @args) { push @set_calls, [@args] };
+            return $code->($if, undef, sub { });
+        },
+    );
+    my sub props($call) {
+        return { map { $_->[0] => $_->[1]->value() } $call->[2]->@* };
+    }
+
+    PVE::InitSystem::Systemd::set_scope_properties('100.scope', CPUQuota => 150, CPUWeight => 300);
+    is($set_calls[-1]->[0], '100.scope', 'systemd set properties: unit');
+    is($set_calls[-1]->[1]->value(), 1, 'systemd set properties: runtime only');
+    is_deeply(props($set_calls[-1]), { CPUQuotaPerSecUSec => 1_500_000, CPUWeight => 300 },
+        'systemd set properties: CPUQuota as CPUQuotaPerSecUSec, CPUWeight');
+
+    PVE::InitSystem::Systemd::set_scope_properties('100.scope', CPUQuota => undef, CPUShares => undef);
+    is_deeply(props($set_calls[-1]), { CPUQuotaPerSecUSec => -1, CPUShares => -1 },
+        'systemd set properties: undef resets (-1, i.e. infinity)');
 }
 
 # --- PVE::Systemd::systemd_call compatibility wrapper ------------------------
