@@ -190,6 +190,9 @@ my sub mock_run($module, $handler) {
     is(cat('cpu.weight'), '100', 'set properties: nothing written when rejecting');
     eval { PVE::InitSystem::LSBService::set_scope_properties('999.scope', CPUWeight => 50) };
     like($@, qr/resource scope '999.scope' not found/, 'set properties: unknown scope');
+
+    is(PVE::InitSystem::LSBService::stop_scope('999.scope'), undef, 'stop_scope: unknown scope is fine');
+    is(PVE::InitSystem::LSBService::reset_failed('100.scope'), undef, 'reset_failed: nothing to do');
 }
 
 # --- LSBService: dump_syslog -----------------------------------------------
@@ -254,7 +257,7 @@ my sub mock_run($module, $handler) {
 # --- Systemd ---------------------------------------------------------------
 
 SKIP: {
-    skip 'Net::DBus not available, skipping systemd backend tests', 8
+    skip 'Net::DBus not available, skipping systemd backend tests', 10
         if !eval { require PVE::InitSystem::Systemd; 1 };
 
     my $show_output = [
@@ -298,6 +301,17 @@ SKIP: {
 
     PVE::InitSystem::Systemd::disable_service('ceph-osd@1', runtime => 1);
     is_deeply($calls->[-1], ['systemctl', 'disable', '--runtime', 'ceph-osd@1'], 'systemd disable --runtime');
+
+    PVE::InitSystem::Systemd::stop_scope('100.scope', timeout => 5, kill => 0);
+    is_deeply($calls->[-1], ['systemctl', 'stop', '100.scope'], 'systemd stop_scope: unit\'s own kill settings apply');
+
+    @$calls = ();
+    PVE::InitSystem::Systemd::reset_failed('pve-dbus-vmstate@100.service', '100.scope');
+    is_deeply(
+        $calls,
+        [['systemctl', 'reset-failed', 'pve-dbus-vmstate@100.service'], ['systemctl', 'reset-failed', '100.scope']],
+        'systemd reset_failed: each unit',
+    );
 
     PVE::InitSystem::Systemd::enable_service('ceph-mon@a');
     is_deeply($calls->[-1], ['systemctl', 'enable', 'ceph-mon@a'], 'systemd enable');
