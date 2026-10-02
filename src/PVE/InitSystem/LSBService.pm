@@ -454,6 +454,54 @@ sub set_scope_properties {
     return;
 }
 
+# Stop a scope: send SIGTERM to all its processes and wait up to $opts{timeout}
+# seconds (default 10) for them to exit. Remaining ones get SIGKILL then,
+# unless $opts{kill} is false (default true), like systemd's SendSIGKILL; such
+# a scope then stays, like systemd's does. An emptied scope gets removed.
+sub stop_scope {
+    my ($unit, %opts) = @_;
+
+    my $timeout = $opts{timeout} // 10;
+    my $kill = $opts{kill} // 1;
+
+    my $path = find_scope_path($unit) // return;
+
+    my sub pids {
+        my $procs = eval { file_get_contents("$path/cgroup.procs") } // '';
+        return grep { /^\d+$/ } split(/\n/, $procs);
+    }
+
+    kill('TERM', pids());
+
+    my $deadline = time() + $timeout;
+    while (my @pids = pids()) {
+        if (time() >= $deadline) {
+            last if !$kill;
+            if (-e "$path/cgroup.kill") { # Linux 5.14+, also catches forking processes
+                PVE::ProcFSTools::write_proc_entry("$path/cgroup.kill", "1");
+            } else {
+                kill('KILL', @pids);
+            }
+            $kill = 0; # only once, then wait for them to be gone
+            $deadline = time() + 5;
+            next;
+        }
+        usleep(WAIT_POLL_INTERVAL_US);
+    }
+
+    rmdir($path) if !pids();
+
+    return;
+}
+
+# There's no 'failed' state to reset for init scripts or the cgroup-based
+# scopes here.
+sub reset_failed {
+    my (@units) = @_;
+
+    return;
+}
+
 sub wait_for_unit_removed($;$) {
     my ($unit, $timeout) = @_;
 

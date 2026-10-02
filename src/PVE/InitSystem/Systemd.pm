@@ -169,6 +169,26 @@ sub set_scope_properties {
     });
 }
 
+# Stop a scope, i.e. its processes. How is up to the scope's own KillMode,
+# SendSIGKILL and TimeoutStopUSec properties, so %opts (see the LSBService
+# backend) is ignored here. Dies if systemctl fails.
+sub stop_scope {
+    my ($unit, %opts) = @_;
+
+    run(['systemctl', 'stop', $unit], outfunc => sub { }, errfunc => sub { });
+}
+
+# Reset the 'failed' state of units, e.g. so that a failed scope or a unit
+# PartOf= it doesn't block starting a new scope with the same name. Errors,
+# e.g. for units not loaded, are ignored.
+sub reset_failed {
+    my (@units) = @_;
+
+    for my $unit (@units) {
+        eval { run(['systemctl', 'reset-failed', $unit], outfunc => sub { }, errfunc => sub { }) };
+    }
+}
+
 sub wait_for_unit_removed($;$) {
     my ($unit, $timeout) = @_;
 
