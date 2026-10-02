@@ -63,12 +63,14 @@ sub enter_systemd_scope {
     return PVE::InitSystem::enter_systemd_scope(@_);
 }
 
+# '&' to pass @_ as is: the facade's subs have the backend's ($;$) prototype,
+# with which a plain call would pass scalar(@_), i.e. the argument count
 sub wait_for_unit_removed($;$) {
-    return PVE::InitSystem::wait_for_unit_removed(@_);
+    return &PVE::InitSystem::wait_for_unit_removed(@_);
 }
 
 sub is_unit_active($;$) {
-    return PVE::InitSystem::is_unit_active(@_);
+    return &PVE::InitSystem::is_unit_active(@_);
 }
 
 sub read_ini {
