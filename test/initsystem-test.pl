@@ -249,4 +249,30 @@ SKIP: {
     is_deeply([$count, $lines->[0]->{n}], [1, 1], 'systemd syslog: lines collected');
 }
 
+# --- PVE::Systemd::systemd_call compatibility wrapper ------------------------
+
+SKIP: {
+    skip 'Net::DBus not available, skipping systemd_call tests', 3
+        if !eval { require PVE::InitSystem::Systemd; 1 };
+
+    require PVE::Systemd;
+
+    my @args;
+    my $mock = Test::MockModule->new('PVE::InitSystem::Systemd');
+    $mock->redefine(systemd_call => sub { @args = @_; return 'result' });
+
+    my $code = sub { };
+    {
+        local $PVE::InitSystem::Backend::MODULE = 'PVE::InitSystem::Systemd';
+        is(PVE::Systemd::systemd_call($code, 5), 'result', 'systemd_call: delegates to backend');
+        is_deeply(\@args, [$code, 5], 'systemd_call: passes code and timeout');
+    }
+    {
+        local $PVE::InitSystem::Backend::MODULE = 'PVE::InitSystem::LSBService';
+        eval { PVE::Systemd::systemd_call($code) };
+        like($@, qr/not available with the init-system backend 'PVE::InitSystem::LSBService'/,
+            'systemd_call: clear error without systemd backend');
+    }
+}
+
 done_testing();
