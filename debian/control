@@ -59,6 +59,7 @@ Depends: libanyevent-perl,
          libyaml-libyaml-perl,
          ${misc:Depends},
          ${perl:Depends}
+Pre-Depends: ${misc:Pre-Depends}
 Breaks: ifupdown2 (<< 2.0.1-1+pve5),
         libpve-guest-common-perl (<< 5.0.1),
         pmg-api (<< 7.1-5),
