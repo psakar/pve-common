@@ -1,3 +1,21 @@
+libpve-common-perl (9.2.3) trixie; urgency=medium
+
+  * add PVE::InitSystem, a facade for init-system specific operations
+    (service control and state, resource scopes, system log, timezones),
+    with PVE::Systemd delegating to it for compatibility
+
+  * add a systemd backend and an LSBService backend (service(8),
+    update-rc.d and cgroup v2, for sysvinit and OpenRC), selected at
+    build time; build with the pkg.pve-common.lsbservice profile for
+    systemd-free derivatives like Devuan
+
+  * daemon: recognize start/stop/restart commands run from LSB init
+    scripts, which export PVE_INIT_SCRIPT=1
+
+  * tools: dump_journal reads the system log via PVE::InitSystem
+
+ -- Petr Sakař <petr.sakar@chare.eu>  Fri, 02 Oct 2026 17:18:46 +0200
+
 libpve-common-perl (9.2.2) trixie; urgency=medium
 
   * schema: improve handling of (trailing) newlines in values
