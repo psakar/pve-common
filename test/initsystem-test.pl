@@ -342,6 +342,22 @@ SKIP: {
         'systemd set properties: undef resets (-1, i.e. infinity)');
 }
 
+# --- PVE::Systemd compatibility wrappers pass their arguments on -------------
+
+{
+    require PVE::Systemd;
+
+    # replace the facade's sub, so this checks what the compiled wrapper passes
+    for my $sub (qw(wait_for_unit_removed is_unit_active enter_systemd_scope)) {
+        my @args;
+        no strict 'refs';
+        no warnings 'redefine';
+        local *{"PVE::InitSystem::$sub"} = sub { @args = @_; return 1 };
+        &{"PVE::Systemd::$sub"}('100.scope', 20);
+        is_deeply(\@args, ['100.scope', 20], "PVE::Systemd::$sub passes its arguments on");
+    }
+}
+
 # --- PVE::Systemd::systemd_call compatibility wrapper ------------------------
 
 SKIP: {
