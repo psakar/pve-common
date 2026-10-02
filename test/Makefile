@@ -20,6 +20,7 @@ TESTS = lock_file.test			\
 	check_pem_test.test \
 	split_pem_test.test \
 	initsystem-test.test \
+	initsystem-taint-test.test \
 
 all:
 

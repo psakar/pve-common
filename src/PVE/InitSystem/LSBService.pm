@@ -97,14 +97,18 @@ my sub setup_slice {
 }
 
 # Find an existing scope by its unit name, in whatever slice it was created.
+# The path is untainted, as callers remove the scope or write to it, also in
+# the API daemons running with taint checks (perl -T), which refuse that for
+# glob()'s results: only slices named as slice_dirs() allows qualify.
 my sub find_scope_path {
     my ($unit) = @_;
 
     my $base = cgroup_base();
     for my $depth (1 .. 4) {
         my $pattern = join('/', $base, ('*.slice') x $depth, $unit);
-        my ($path) = grep { -d } glob($pattern);
-        return $path if defined($path);
+        for my $path (grep { -d } glob($pattern)) {
+            return $1 if $path =~ m!^(\Q$base\E(?:/[A-Za-z0-9_.:\\-]+\.slice){$depth}/\Q$unit\E)$!;
+        }
     }
 
     return undef;
@@ -151,10 +155,12 @@ my sub instance_of {
     return (init_script_name($1), $2);
 }
 
+# The markers' names, untainted for removing them and running the template's
+# init script with their instance (see find_scope_path).
 my sub instance_markers {
     my ($dir, $template) = @_;
 
-    return map { s{^.*/}{}r } glob("$dir/\Q$template\E\@*");
+    return map { m!/(\Q$template\E\@[^/]*)$! ? $1 : () } glob("$dir/\Q$template\E\@*");
 }
 
 my sub set_instance_marker {
@@ -563,9 +569,10 @@ sub stop_scope {
 
     my $path = find_scope_path($unit) // return;
 
+    # untainted for kill() (see find_scope_path)
     my sub pids {
         my $procs = eval { file_get_contents("$path/cgroup.procs") } // '';
-        return grep { /^\d+$/ } split(/\n/, $procs);
+        return map { /^(\d+)$/ ? $1 : () } split(/\n/, $procs);
     }
 
     kill('TERM', pids());
