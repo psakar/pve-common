@@ -130,6 +130,51 @@ my sub mock_run($module, $handler) {
     is(scalar(@$calls), $calls_before, 'status: missing script is not run');
 }
 
+# --- LSBService: scope placement (fake cgroupfs) ---------------------------
+
+{
+    my $cg = "$test_dir/cgroup";
+    my $cgroup_mock = Test::MockModule->new('PVE::CGroup');
+    $cgroup_mock->redefine(cgroup_mode => sub { 2 }, cgroupv2_base_path => sub { $cg });
+    # cgroupfs interface files exist already, write_proc_entry doesn't create them
+    my $procfs_mock = Test::MockModule->new('PVE::ProcFSTools');
+    $procfs_mock->redefine(write_proc_entry => sub ($file, $data) { file_set_contents($file, $data) });
+
+    # cgroupfs creates the interface files itself; pre-create what's read
+    for my $dir ('', '/pve.slice', '/qemu.slice', '/pve.slice/pve-test.slice') {
+        make_path("$cg$dir");
+        file_set_contents("$cg$dir/cgroup.controllers", "cpu io memory pids\n");
+    }
+
+    PVE::InitSystem::LSBService::enter_systemd_scope('100', 'VM', Slice => 'qemu.slice', CPUQuota => 150);
+    ok(-d "$cg/qemu.slice/100.scope", 'scope: created in the given slice, like systemd');
+    is(PVE::File::file_get_contents("$cg/qemu.slice/100.scope/cpu.max"), '150000 100000', 'scope: CPUQuota');
+    is(PVE::File::file_get_contents("$cg/qemu.slice/100.scope/cgroup.procs"), "$$", 'scope: caller moved in');
+    is(PVE::File::file_get_contents("$cg/qemu.slice/cgroup.subtree_control"), '+cpu +io +memory +pids',
+        'scope: controllers delegated to the slice');
+
+    PVE::InitSystem::LSBService::enter_systemd_scope('200', 'CT');
+    ok(-d "$cg/pve.slice/200.scope", 'scope: pve.slice without Slice property');
+
+    PVE::InitSystem::LSBService::enter_systemd_scope('300', 'test', Slice => 'pve-test.slice');
+    ok(-d "$cg/pve.slice/pve-test.slice/300.scope", 'scope: dash in slice name nests it');
+    is(PVE::File::file_get_contents("$cg/pve.slice/pve-test.slice/cgroup.subtree_control"), '+cpu +io +memory +pids',
+        'scope: controllers delegated through nested slices');
+
+    for my $bad ('qemu', '-x.slice', 'a--b.slice', '../x.slice') {
+        eval { PVE::InitSystem::LSBService::enter_systemd_scope('400', 'bad', Slice => $bad) };
+        like($@, qr/invalid slice name/, "scope: invalid slice name '$bad' rejected");
+    }
+    ok(!glob("$cg/*/400.scope") && !-d "$cg/400.scope", 'scope: rejected slice created nothing');
+
+    file_set_contents("$cg/qemu.slice/100.scope/cgroup.events", "populated 1\nfrozen 0\n");
+    file_set_contents("$cg/pve.slice/pve-test.slice/300.scope/cgroup.events", "populated 0\nfrozen 0\n");
+    ok(PVE::InitSystem::LSBService::is_unit_active('100.scope'), 'scope: found by name in qemu.slice, active');
+    ok(!PVE::InitSystem::LSBService::is_unit_active('300.scope'), 'scope: found in nested slice, inactive');
+    ok(!PVE::InitSystem::LSBService::is_unit_active('999.scope'), 'scope: unknown scope inactive');
+    ok(PVE::InitSystem::LSBService::wait_for_unit_removed('999.scope', 1), 'scope: unknown scope counts as removed');
+}
+
 # --- LSBService: dump_syslog -----------------------------------------------
 
 {

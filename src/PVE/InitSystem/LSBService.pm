@@ -13,10 +13,11 @@ package PVE::InitSystem::LSBService;
 # backend's enter_systemd_scope/wait_for_unit_removed/is_unit_active (names
 # kept for API compatibility with PVE::InitSystem's fixed interface, even
 # though they are systemd vocabulary): every scope is a plain cgroup
-# directory under SCOPE_PARENT_SLICE. Properties that are systemd
-# service-manager semantics rather than cgroup attributes (Slice placement,
-# KillMode, After, Before, SendSIGKILL, TimeoutStopUSec) have no equivalent
-# here and are ignored. CPUShares (a cgroupv1 notion) is rejected rather than
+# directory in the slice given by the Slice property (SCOPE_PARENT_SLICE if
+# none), at the same path as systemd would use. Properties that are systemd
+# service-manager semantics rather than cgroup attributes (KillMode, After,
+# Before, SendSIGKILL, TimeoutStopUSec) have no equivalent here and are
+# ignored. CPUShares (a cgroupv1 notion) is rejected rather than
 # converted, since a numerically "equivalent" cgroupv2 weight does not exist;
 # callers need to pass CPUWeight under this backend.
 #
@@ -38,40 +39,75 @@ use PVE::File qw(file_get_contents file_set_contents);
 use PVE::ProcFSTools;
 use PVE::Tools ();
 
+# for scopes created without a Slice= property
 use constant SCOPE_PARENT_SLICE => 'pve.slice';
 # controllers delegated down to the scopes, if the kernel provides them
 use constant SCOPE_CONTROLLERS => qw(cpu io memory pids);
 use constant WAIT_POLL_INTERVAL_US => 200_000; # 0.2s, while waiting for a scope to empty out
 use constant ZONEINFO_DIR => '/usr/share/zoneinfo';
 
-my sub scope_cgroup_path {
-    my ($unit) = @_;
-
+my sub cgroup_base {
     die "resource scopes under the LSBService backend require cgroupv2\n"
         if PVE::CGroup::cgroup_mode() != 2;
 
-    return PVE::CGroup::cgroupv2_base_path() . '/' . SCOPE_PARENT_SLICE . "/$unit";
+    return PVE::CGroup::cgroupv2_base_path();
 }
 
-# Create SCOPE_PARENT_SLICE and delegate SCOPE_CONTROLLERS from the cgroupv2
+# The cgroup directories of a slice, following systemd's naming: a dash in the
+# name nests it, e.g. 'a-b.slice' is 'a.slice/a-b.slice'. Placing scopes the
+# same way as systemd keeps their cgroup paths independent of the backend, e.g.
+# qemu-server's 'qemu.slice/<vmid>.scope' (PVE::QemuServer::CGroup).
+my sub slice_dirs {
+    my ($slice) = @_;
+
+    die "invalid slice name '$slice'\n"
+        if $slice !~ m/^([A-Za-z0-9_.:\\]+(?:-[A-Za-z0-9_.:\\]+)*)\.slice$/;
+
+    my @parts = split(/-/, $1);
+    return map { join('-', @parts[0 .. $_]) . '.slice' } 0 .. $#parts;
+}
+
+# Create the slice for a scope and delegate SCOPE_CONTROLLERS from the cgroupv2
 # root down through it, so that scopes below it get their cpu.max/cpu.weight/...
 # interface files. Under systemd this delegation is done by systemd itself;
 # here nobody else does it (OpenRC only enables controllers for its own
 # per-service cgroups), and without it a scope only has the cgroup.* core
 # files. This is fine with cgroupv2's "no internal processes" rule as long as
-# nothing is placed in the slice itself, only in scopes below it.
-my sub setup_scope_parent {
-    my $base = PVE::CGroup::cgroupv2_base_path();
-    my $slice = "$base/" . SCOPE_PARENT_SLICE;
+# nothing is placed in the slices themselves, only in scopes below them.
+# Returns the slice's path.
+my sub setup_slice {
+    my ($slice) = @_;
 
-    make_path($slice);
+    my $base = cgroup_base();
+    my @dirs = slice_dirs($slice);
+    my $path = join('/', $base, @dirs);
 
-    for my $cgroup ($base, $slice) {
+    make_path($path);
+
+    my $cgroup = $base;
+    for my $dir (undef, @dirs) {
+        $cgroup .= "/$dir" if defined($dir);
         my %available = map { $_ => 1 } split(/\s+/, file_get_contents("$cgroup/cgroup.controllers"));
         my @enable = map { "+$_" } grep { $available{$_} } SCOPE_CONTROLLERS;
         next if !@enable;
         PVE::ProcFSTools::write_proc_entry("$cgroup/cgroup.subtree_control", join(' ', @enable));
     }
+
+    return $path;
+}
+
+# Find an existing scope by its unit name, in whatever slice it was created.
+my sub find_scope_path {
+    my ($unit) = @_;
+
+    my $base = cgroup_base();
+    for my $depth (1 .. 4) {
+        my $pattern = join('/', $base, ('*.slice') x $depth, $unit);
+        my ($path) = grep { -d } glob($pattern);
+        return $path if defined($path);
+    }
+
+    return undef;
 }
 
 # Paths are package variables so that tests can point them elsewhere.
@@ -357,21 +393,22 @@ sub enter_systemd_scope {
     die "missing description\n" if !defined($description);
 
     $unit .= '.scope';
-    my $path = scope_cgroup_path($unit);
 
     # Validate everything before touching the cgroup tree, so that a rejected
     # property leaves neither a stray scope nor the caller moved into it.
     my $quota = delete $extra{CPUQuota};
     my $weight = delete $extra{CPUWeight};
+    my $slice = delete $extra{Slice} // SCOPE_PARENT_SLICE;
+    slice_dirs($slice);    # validate
 
-    delete $extra{$_} for qw(Slice KillMode After Before SendSIGKILL TimeoutStopUSec timeout);
+    delete $extra{$_} for qw(KillMode After Before SendSIGKILL TimeoutStopUSec timeout);
 
     if (%extra) {
         die "don't know how to apply " . join(', ', sort keys %extra)
             . " for an LSBService resource scope\n";
     }
 
-    setup_scope_parent();
+    my $path = setup_slice($slice) . "/$unit";
     make_path($path);
 
     if (defined($quota)) {
@@ -392,9 +429,7 @@ sub enter_systemd_scope {
 sub wait_for_unit_removed($;$) {
     my ($unit, $timeout) = @_;
 
-    my $path = scope_cgroup_path($unit);
-
-    return 1 if !-d $path;
+    my $path = find_scope_path($unit) // return 1;
 
     my $deadline = defined($timeout) ? time() + $timeout : undef;
 
@@ -419,8 +454,7 @@ sub wait_for_unit_removed($;$) {
 sub is_unit_active($;$) {
     my ($unit) = @_;
 
-    my $path = scope_cgroup_path($unit);
-    return 0 if !-d $path;
+    my $path = find_scope_path($unit) // return 0;
 
     my $events = eval { file_get_contents("$path/cgroup.events") };
     return 0 if !defined($events);
