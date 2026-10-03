@@ -1,4 +1,4 @@
-libpve-common-perl (9.2.3) trixie; urgency=medium
+libpve-common-perl (9.2.3+devuan1) trixie; urgency=medium
 
   * add PVE::InitSystem, a facade for init-system specific operations
     (service control and state, resource scopes, system log, timezones),
