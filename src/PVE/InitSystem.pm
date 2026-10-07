@@ -45,6 +45,7 @@ my @interface = qw(
     service_status
     service_main_pid
     dump_syslog
+    read_journal
     get_timezone
     set_timezone
     list_timezones

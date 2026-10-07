@@ -13,7 +13,7 @@ use File::Path qw(make_path remove_tree);
 use Test::MockModule;
 use Test::More;
 
-use PVE::File qw(file_set_contents);
+use PVE::File qw(file_get_contents file_set_contents);
 use PVE::InitSystem::LSBService;
 
 my $test_dir = "/tmp/test-initsystem-$$";
@@ -407,6 +407,84 @@ my sub mock_run($module, $handler) {
 
     eval { PVE::InitSystem::LSBService::dump_syslog(0, 50, 'yesterday') };
     like($@, qr/unable to parse date-time 'yesterday'/, 'syslog: invalid since is rejected');
+}
+
+# --- LSBService: read_journal ----------------------------------------------
+
+{
+    my $old = "$test_dir/journal-syslog.1";
+    my $cur = "$test_dir/journal-syslog";
+    local $PVE::InitSystem::LSBService::SYSLOG_FILES = [$old, $cur];
+
+    file_set_contents(
+        $old,
+        "2026-10-02T00:00:00.000001Z host pveproxy[100]: one\n"
+            . "2026-10-02T00:01:00.000001Z host kernel: two\n",
+    );
+    file_set_contents(
+        $cur,
+        "2026-10-02T00:02:00.000001Z host sshd[200]: three\n"
+            . "2026-10-02T00:03:00.000001Z host postfix/smtpd[300]: four\n"
+            . "2026-10-02T00:04:00.000001Z host pveproxy[101]: five\n",
+    );
+
+    my sub read_journal(%param) { PVE::InitSystem::LSBService::read_journal(%param) }
+    my sub texts($res) { [map { m/: (\w+)$/ ? $1 : () } @$res[1 .. $#$res - 1]] }
+
+    my $all = read_journal();
+    is_deeply(texts($all), [qw(one two three four five)], 'journal: all lines, oldest first');
+    like($all->[0], qr/^rsyslog:\d+:\d+:0$/, 'journal: first element is the first line\'s cursor');
+    like($all->[-1], qr/^rsyslog:\d+:\d+:\d+$/, 'journal: last element is the last line\'s cursor');
+
+    my $tail = read_journal(lastentries => 2);
+    is_deeply(texts($tail), [qw(four five)], 'journal: lastentries');
+
+    is_deeply(read_journal(startcursor => $all->[-1]), [], 'journal: nothing after the last cursor');
+
+    # appended, as rsyslog does (same inode)
+    open(my $fh, '>>', $cur) or die;
+    print $fh "2026-10-02T00:05:00.000001Z host pvedaemon[400]: six\n";
+    close($fh);
+    my $new = read_journal(startcursor => $all->[-1]);
+    is_deeply(texts($new), [qw(six)], 'journal: startcursor gives only the newer lines');
+
+    my $older = read_journal(endcursor => $tail->[0], lastentries => 2);
+    is_deeply(texts($older), [qw(two three)], 'journal: endcursor gives the older lines, across files');
+
+    # logrotate: syslog becomes syslog.1, a new syslog is started
+    rename($old, "$old.gone") or die;
+    rename($cur, $old) or die;
+    file_set_contents($cur, "2026-10-02T00:06:00.000001Z host pvedaemon[400]: seven\n");
+    is_deeply(
+        texts(read_journal(startcursor => $new->[-1])),
+        [qw(seven)],
+        'journal: a cursor stays valid when its file is rotated',
+    );
+    is_deeply(
+        texts(read_journal(startcursor => $all->[0])),
+        [qw(three four five six seven)],
+        'journal: start cursor in a file rotated away: everything',
+    );
+    is_deeply(read_journal(endcursor => $all->[0]), [], 'journal: end cursor rotated away: nothing');
+
+    is_deeply(texts(read_journal(unit => 'ssh')), [qw(three)], 'journal: unit, with tag alias');
+    is_deeply(texts(read_journal(unit => 'postfix')), [qw(four)], 'journal: unit matches sub-programs');
+    is_deeply(texts(read_journal(service => 'postfix')), [], 'journal: identifier matches exactly');
+    is_deeply(texts(read_journal(service => 'pvedaemon')), [qw(six seven)], 'journal: identifier');
+
+    file_set_contents($old, "2026-10-02T00:01:00.000001Z host kernel: two\n" . file_get_contents($old));
+    is_deeply(texts(read_journal(kernel => 1)), [qw(two)], 'journal: kernel messages');
+
+    # 2026-10-02T00:03:00Z = 1790899380
+    is_deeply(
+        texts(read_journal(since => 1790899380, until => 1790899440)),
+        [qw(four five)],
+        'journal: since/until (epoch), inclusive',
+    );
+    is_deeply(read_journal(service => 'nonexistent'), [], 'journal: no match gives nothing');
+
+    eval { read_journal(startcursor => 'bogus') };
+    like($@, qr/invalid cursor/, 'journal: invalid cursor is rejected');
 }
 
 # --- Systemd ---------------------------------------------------------------

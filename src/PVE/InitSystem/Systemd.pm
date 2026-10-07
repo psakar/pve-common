@@ -383,6 +383,12 @@ sub dump_syslog {
     return ($count, $lines);
 }
 
+# With systemd, the journal API is served by mini-journalreader (a dependency
+# of pve-manager's systemd variant) directly; see the LSBService backend.
+sub read_journal {
+    die "reading the journal is done with mini-journalreader under systemd\n";
+}
+
 # Mounts are mount units: persistent ones in $UNIT_DIR, enabled for boot,
 # runtime-only ones in $RUNTIME_UNIT_DIR. Package variables so that tests can
 # point them elsewhere.

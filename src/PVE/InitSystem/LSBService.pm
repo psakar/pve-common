@@ -489,6 +489,114 @@ sub dump_syslog {
     return ($count, $lines);
 }
 
+# A cursor of read_journal(): a line's position in the rsyslog files, by the
+# file's device and inode (so it stays valid when logrotate renames syslog to
+# syslog.1) and the line's byte offset.
+my sub format_cursor {
+    my ($dev, $ino, $offset) = @_;
+    return "rsyslog:$dev:$ino:$offset";
+}
+
+my sub parse_cursor {
+    my ($cursor) = @_;
+
+    return undef if !defined($cursor) || !length($cursor);
+    raise_param_exc({ cursor => "invalid cursor '$cursor'" })
+        if $cursor !~ m/^rsyslog:(\d+):(\d+):(\d+)$/;
+    return [$1, $2, $3];
+}
+
+# The journal API (as served by mini-journalreader with systemd) from the
+# rsyslog files, for the web UI's journal view. Returns the matching lines in
+# mini-journalreader's plain (-j) format: the first entry's cursor, the lines,
+# the last entry's cursor; nothing when no line matches.
+#
+# %param: lastentries (only the last X of the matching lines), since/until
+# (UNIX epoch, inclusive), startcursor/endcursor (only lines after/before that
+# line), service (a syslog identifier), unit (a service, matched as by
+# dump_syslog), kernel (only kernel messages). The files don't record the
+# priority, so 'priority' is ignored; 'structured', 'identifiers' and 'units'
+# too, as the plain format has no records for them.
+sub read_journal {
+    my (%param) = @_;
+
+    my $start = parse_cursor($param{startcursor});
+    my $end = parse_cursor($param{endcursor});
+    my ($since, $until, $last) = @param{qw(since until lastentries)};
+
+    my $tag;
+    if ($param{kernel}) {
+        $tag = 'kernel';
+    } elsif (defined($param{service}) && length($param{service})) {
+        $tag = $param{service};
+    } elsif (defined($param{unit}) && length($param{unit})) {
+        $tag = init_script_name($param{unit});
+        $tag = $log_tag_aliases->{$tag} // $tag;
+    }
+    my $subprograms = !$param{kernel} && !defined($param{service});
+
+    my @files;
+    for my $file (@$SYSLOG_FILES) {
+        my ($dev, $ino) = stat($file) or next;
+        push @files, [$file, $dev, $ino];
+    }
+    my sub file_index {
+        my ($cursor) = @_;
+        for my $i (0 .. $#files) {
+            return $i if $files[$i]->[1] == $cursor->[0] && $files[$i]->[2] == $cursor->[1];
+        }
+        return undef;
+    }
+
+    # a start cursor in a file that has been rotated away: everything is newer;
+    # an end cursor there: nothing is older
+    my ($first_file, $first_offset) = (0, undef);
+    if ($start && defined(my $i = file_index($start))) {
+        ($first_file, $first_offset) = ($i, $start->[2]);
+    }
+    my ($last_file, $end_offset) = ($#files, undef);
+    if ($end) {
+        my $i = file_index($end) // return [];
+        ($last_file, $end_offset) = ($i, $end->[2]);
+    }
+
+    my $now = time();
+    my @entries; # [cursor, line]
+    for my $i ($first_file .. $last_file) {
+        my ($file, $dev, $ino) = $files[$i]->@*;
+        open(my $fh, '<', $file) or next;
+        if ($i == $first_file && defined($first_offset)) {
+            # skip the start cursor's own line
+            seek($fh, $first_offset, 0) or next;
+            <$fh>;
+        }
+        while (1) {
+            my $offset = tell($fh);
+            last if $i == $last_file && defined($end_offset) && $offset >= $end_offset;
+            my $line = <$fh> // last;
+            chomp($line);
+
+            if (defined($since) || defined($until) || defined($tag)) {
+                my ($time, $prog) = parse_syslog_line($line, $now);
+                next if !defined($time);
+                next if defined($since) && $time < $since;
+                next if defined($until) && $time > $until;
+                next
+                    if defined($tag)
+                    && $prog ne $tag
+                    && !($subprograms && $prog =~ m/^\Q$tag\E\//);
+            }
+
+            push @entries, [format_cursor($dev, $ino, $offset), $line];
+            shift @entries if $last && @entries > $last;
+        }
+        close($fh);
+    }
+
+    return [] if !@entries;
+    return [$entries[0]->[0], (map { $_->[1] } @entries), $entries[-1]->[0]];
+}
+
 # Note that the description is accepted (and required, as in the systemd
 # backend) but unused here - only for API compatibility.
 sub enter_systemd_scope {

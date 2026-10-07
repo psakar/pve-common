@@ -1,3 +1,12 @@
+libpve-common-perl (9.2.3+devuan2) trixie; urgency=medium
+
+  * PVE::InitSystem: add read_journal, the journal API from the rsyslog
+    files in the LSBService backend (mini-journalreader's plain format,
+    with cursors that survive log rotation), so the web UI's system and
+    service logs work without systemd's journal
+
+ -- Petr Sakař <petr.sakar@chare.eu>  Wed, 07 Oct 2026 08:28:09 +0200
+
 libpve-common-perl (9.2.3+devuan1) trixie; urgency=medium
 
   * add PVE::InitSystem, a facade for init-system specific operations
