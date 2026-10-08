@@ -1,3 +1,12 @@
+libpve-common-perl (9.2.3+devuan3) trixie; urgency=medium
+
+  * PVE::InitSystem LSBService: service_status reported a wrong enabled
+    state after the first check, e.g. for the services list of the web UI
+    and API: the sysv-rc start link check iterated a glob() in scalar
+    context across calls
+
+ -- Petr Sakař <petr.sakar@chare.eu>  Fri, 09 Oct 2026 00:12:59 +0200
+
 libpve-common-perl (9.2.3+devuan2) trixie; urgency=medium
 
   * PVE::InitSystem: add read_journal, the journal API from the rsyslog

@@ -330,7 +330,9 @@ my sub lsb_header_field {
 my sub service_enabled {
     my ($script) = @_;
 
-    return 1 if glob("$RC_DIR_GLOB/S[0-9][0-9]$script");
+    # list context: a glob() in scalar context iterates, keeping its state
+    # between calls, so it would answer with an earlier check's matches
+    return 1 if () = glob("$RC_DIR_GLOB/S[0-9][0-9]$script");
     return 1 if grep { -l "$_/$script" || -e "$_/$script" } glob($OPENRC_RUNLEVEL_GLOB);
     return 0;
 }

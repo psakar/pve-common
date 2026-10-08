@@ -118,14 +118,15 @@ my sub mock_run($module, $handler) {
 
     my $script = "#!/bin/sh\n### BEGIN INIT INFO\n# Provides: %s\n"
         . "# Required-Start: \$remote_fs\n# Short-Description: %s\n### END INIT INFO\n";
-    for my $svc (qw(foo bar baz)) {
+    for my $svc (qw(foo bar baz qux)) {
         file_set_contents("$test_dir/init.d/$svc", sprintf($script, $svc, "The $svc daemon"));
         chmod(0755, "$test_dir/init.d/$svc");
     }
     symlink("../init.d/foo", "$test_dir/rc2.d/S02foo"); # sysv-rc enabled
+    symlink("../init.d/qux", "$test_dir/rc2.d/S03qux"); # sysv-rc enabled
     symlink("/etc/init.d/bar", "$test_dir/runlevels/default/bar"); # OpenRC enabled
 
-    my $status_rc = { foo => 0, bar => 3, baz => 1 };
+    my $status_rc = { foo => 0, bar => 3, baz => 1, qux => 0 };
     my ($mock, $calls) = mock_run('PVE::InitSystem::LSBService', sub ($cmd) { $status_rc->{ $cmd->[1] } });
 
     my $st = PVE::InitSystem::LSBService::service_status('foo.service');
@@ -143,6 +144,17 @@ my sub mock_run($module, $handler) {
     $st = PVE::InitSystem::LSBService::service_status('baz');
     is($st->{unit_state}, 'disabled', 'status: no start link or runlevel is disabled');
     is($st->{active_state}, 'failed', 'status: exit 1 is failed');
+
+    # one status after another, as the services API does: each check must
+    # only see its own script's start links (a glob() in scalar context
+    # would continue the previous check's matches instead)
+    my @order = qw(foo qux baz qux foo baz baz qux);
+    my %expected = (foo => 'enabled', qux => 'enabled', baz => 'disabled');
+    is_deeply(
+        [map { PVE::InitSystem::LSBService::service_status($_)->{unit_state} } @order],
+        [map { $expected{$_} } @order],
+        'status: enabled state of consecutive checks is independent',
+    );
 
     my $calls_before = scalar(@$calls);
     $st = PVE::InitSystem::LSBService::service_status('missing');
