@@ -290,6 +290,19 @@ my sub mock_run($module, $handler) {
     like($@, qr/resource scope '999.scope' not found/, 'set properties: unknown scope');
 
     is(PVE::InitSystem::LSBService::stop_scope('999.scope'), undef, 'stop_scope: unknown scope is fine');
+
+    is(PVE::InitSystem::LSBService::remove_empty_scope('999.scope'), 1, 'remove_empty_scope: unknown scope is gone');
+    is(PVE::InitSystem::LSBService::remove_empty_scope('100.scope'), 0, 'remove_empty_scope: populated scope stays');
+    ok(-d "$cg/qemu.slice/100.scope", 'remove_empty_scope: populated scope not removed');
+    # an emptied scope's cgroup directory only has the interface files, which
+    # rmdir ignores on cgroupfs; make that one here
+    mkdir("$cg/qemu.slice/500.scope");
+    is(PVE::InitSystem::LSBService::remove_empty_scope('500.scope'), 0, 'remove_empty_scope: no cgroup.events, kept');
+    my $empty = "$cg/qemu.slice/600.scope";
+    mkdir($empty);
+    file_set_contents("$empty/cgroup.events", "populated 0\nfrozen 0\n");
+    eval { PVE::InitSystem::LSBService::remove_empty_scope('600.scope') };
+    like($@, qr/failed to remove resource scope '600.scope'/, 'remove_empty_scope: rmdir of the empty scope tried');
     is(PVE::InitSystem::LSBService::reset_failed('100.scope'), undef, 'reset_failed: nothing to do');
 }
 
@@ -500,6 +513,14 @@ my sub mock_run($module, $handler) {
 }
 
 # --- Systemd ---------------------------------------------------------------
+
+SKIP: {
+    skip 'Net::DBus not available, skipping systemd backend tests', 1
+        if !eval { require PVE::InitSystem::Systemd; 1 };
+
+    ok(!PVE::InitSystem::Systemd->can('remove_empty_scope'),
+        'systemd: no remove_empty_scope (optional interface, systemd removes empty scopes itself)');
+}
 
 SKIP: {
     skip 'Net::DBus not available, skipping systemd backend tests', 10

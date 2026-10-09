@@ -708,6 +708,24 @@ sub stop_scope {
     return;
 }
 
+# Remove a resource scope once its last process is gone, as systemd does with
+# a transient scope by itself; here nothing else does (wait_for_unit_removed
+# only on the next start of the same scope). Only this backend has it, see the
+# optional interface of PVE::InitSystem. Returns 1 if the scope is gone (also
+# if there's none), 0 if it still has processes.
+sub remove_empty_scope {
+    my ($unit) = @_;
+
+    my $path = find_scope_path($unit) // return 1;
+
+    my $events = eval { file_get_contents("$path/cgroup.events") };
+    return 0 if !defined($events) || $events !~ m/^populated\s+0\s*$/m;
+
+    rmdir($path) or die "failed to remove resource scope '$unit' - $!\n";
+
+    return 1;
+}
+
 # There's no 'failed' state to reset for init scripts or the cgroup-based
 # scopes here.
 sub reset_failed {

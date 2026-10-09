@@ -1,3 +1,11 @@
+libpve-common-perl (9.2.3+devuan4) trixie; urgency=medium
+
+  * PVE::InitSystem: add remove_empty_scope, as an optional interface only
+    provided by the LSBService backend: removes a resource scope once its
+    processes are gone, as systemd does with transient scopes by itself
+
+ -- Petr Sakař <petr.sakar@chare.eu>  Fri, 09 Oct 2026 21:23:18 +0200
+
 libpve-common-perl (9.2.3+devuan3) trixie; urgency=medium
 
   * PVE::InitSystem LSBService: service_status reported a wrong enabled
