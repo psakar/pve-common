@@ -44,6 +44,7 @@ use constant SCOPE_PARENT_SLICE => 'pve.slice';
 # controllers delegated down to the scopes, if the kernel provides them
 use constant SCOPE_CONTROLLERS => qw(cpu io memory pids);
 use constant WAIT_POLL_INTERVAL_US => 200_000; # 0.2s, while waiting for a scope to empty out
+use constant REMOVE_POLL_INTERVAL_US => 20_000; # 0.02s, for exited processes to be reaped
 use constant ZONEINFO_DIR => '/usr/share/zoneinfo';
 
 my sub cgroup_base {
@@ -713,13 +714,27 @@ sub stop_scope {
 # only on the next start of the same scope). Only this backend has it, see the
 # optional interface of PVE::InitSystem. Returns 1 if the scope is gone (also
 # if there's none), 0 if it still has processes.
+#
+# An exited process still counts as in its cgroup until it's reaped, though
+# it's no longer listed in cgroup.procs: e.g. QEMU right after 'qm stop' saw it
+# gone, while init hasn't reaped it yet. So without processes left, wait up to
+# $timeout seconds (default 5) for the scope to empty out.
 sub remove_empty_scope {
-    my ($unit) = @_;
+    my ($unit, $timeout) = @_;
 
     my $path = find_scope_path($unit) // return 1;
 
-    my $events = eval { file_get_contents("$path/cgroup.events") };
-    return 0 if !defined($events) || $events !~ m/^populated\s+0\s*$/m;
+    my $deadline = time() + ($timeout // 5);
+    while (1) {
+        my $events = eval { file_get_contents("$path/cgroup.events") };
+        return 0 if !defined($events);
+        last if $events =~ m/^populated\s+0\s*$/m;
+
+        my $procs = eval { file_get_contents("$path/cgroup.procs") } // '';
+        return 0 if $procs =~ m/\d/ || time() >= $deadline;
+
+        usleep(REMOVE_POLL_INTERVAL_US);
+    }
 
     rmdir($path) or die "failed to remove resource scope '$unit' - $!\n";
 

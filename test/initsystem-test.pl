@@ -292,7 +292,14 @@ my sub mock_run($module, $handler) {
     is(PVE::InitSystem::LSBService::stop_scope('999.scope'), undef, 'stop_scope: unknown scope is fine');
 
     is(PVE::InitSystem::LSBService::remove_empty_scope('999.scope'), 1, 'remove_empty_scope: unknown scope is gone');
+    file_set_contents("$cg/qemu.slice/100.scope/cgroup.procs", "4242\n");
     is(PVE::InitSystem::LSBService::remove_empty_scope('100.scope'), 0, 'remove_empty_scope: populated scope stays');
+    file_set_contents("$cg/qemu.slice/100.scope/cgroup.procs", "");
+    my $start = time();
+    is(PVE::InitSystem::LSBService::remove_empty_scope('100.scope', 1), 0,
+        'remove_empty_scope: populated without listed processes (unreaped), kept after timeout');
+    ok(time() - $start >= 1, 'remove_empty_scope: waited for unreaped processes');
+    file_set_contents("$cg/qemu.slice/100.scope/cgroup.procs", "$$");
     ok(-d "$cg/qemu.slice/100.scope", 'remove_empty_scope: populated scope not removed');
     # an emptied scope's cgroup directory only has the interface files, which
     # rmdir ignores on cgroupfs; make that one here
