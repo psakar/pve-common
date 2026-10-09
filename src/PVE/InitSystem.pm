@@ -51,9 +51,20 @@ my @interface = qw(
     list_timezones
 );
 
+# Only provided by backends that need them, so that callers built for another
+# init system (see e.g. qemu-server's PVE_INIT_SYSTEM) don't change at all.
+my @optional_interface = qw(
+    remove_empty_scope
+);
+
 for my $sym (@interface) {
     no strict 'refs';
     *{$sym} = \&{"${backend}::${sym}"};
+}
+
+for my $sym (@optional_interface) {
+    no strict 'refs';
+    *{$sym} = \&{"${backend}::${sym}"} if $backend->can($sym);
 }
 
 1;
