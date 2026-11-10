@@ -55,7 +55,7 @@ my sub terminated_by($pid) {
     my $cgroup_mock = Test::MockModule->new('PVE::CGroup');
     $cgroup_mock->redefine(cgroup_mode => sub { 2 }, cgroupv2_base_path => sub { $cg });
 
-    for my $scope (qw(100 101 102 103 104)) {
+    for my $scope (qw(100 101 102 103 104 105 106)) {
         make_path("$cg/qemu.slice/$scope.scope");
     }
 
@@ -92,6 +92,24 @@ my sub terminated_by($pid) {
     file_set_contents("$cg/qemu.slice/104.scope/cgroup.procs", '');
     eval { PVE::InitSystem::LSBService::stop_scope('104.scope') };
     is($@, '', 'stop_scope: rmdir of the found scope works under -T');
+
+    # kill_scope: the signal right away, via kill() without cgroup.kill
+    $pid = spawn_sleeper();
+    file_set_contents("$cg/qemu.slice/105.scope/cgroup.procs", "$pid\n");
+    eval { PVE::InitSystem::LSBService::kill_scope('105.scope', 'SIGKILL') };
+    is($@, '', 'kill_scope: kill of PIDs read from cgroup.procs works under -T');
+    is(terminated_by($pid), POSIX::SIGKILL(), 'kill_scope: process got SIGKILL');
+    ok(-d "$cg/qemu.slice/105.scope", 'kill_scope: scope not removed');
+
+    # with cgroup.kill, SIGKILL goes through it
+    file_set_contents("$cg/qemu.slice/106.scope/cgroup.kill", '');
+    eval { PVE::InitSystem::LSBService::kill_scope('106.scope', 'KILL') };
+    is($@, '', 'kill_scope: write to cgroup.kill works under -T');
+    is(file_get_contents("$cg/qemu.slice/106.scope/cgroup.kill"), '1', 'kill_scope: cgroup.kill used');
+
+    is(PVE::InitSystem::LSBService::kill_scope('999.scope', 'KILL'), undef, 'kill_scope: unknown scope is fine');
+    eval { PVE::InitSystem::LSBService::kill_scope('105.scope', 'KILL; rm') };
+    like($@, qr/invalid signal/, 'kill_scope: invalid signal rejected');
 }
 
 # --- template service instances ---------------------------------------------

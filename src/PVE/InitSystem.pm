@@ -26,6 +26,7 @@ my @interface = qw(
     enter_systemd_scope
     set_scope_properties
     stop_scope
+    kill_scope
     reset_failed
     create_mount
     get_mount

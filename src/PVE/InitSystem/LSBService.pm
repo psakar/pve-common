@@ -709,6 +709,31 @@ sub stop_scope {
     return;
 }
 
+# See PVE::InitSystem::Systemd::kill_scope: send a signal to all processes of
+# a scope at once. SIGKILL goes through cgroup.kill where there is one (Linux
+# 5.14+), which also catches processes forked meanwhile. Doesn't wait or remove
+# the scope, see wait_for_unit_removed. An unknown scope is fine.
+sub kill_scope {
+    my ($unit, $signal) = @_;
+
+    my ($name) = $signal =~ m/^(?:SIG)?([A-Z][A-Z0-9+-]*|\d+)$/
+        or die "invalid signal '$signal'\n";
+
+    my $path = find_scope_path($unit) // return;
+
+    if (($name eq 'KILL' || $name eq '9') && -e "$path/cgroup.kill") {
+        PVE::ProcFSTools::write_proc_entry("$path/cgroup.kill", "1");
+        return;
+    }
+
+    # untainted for kill() (see find_scope_path)
+    my $procs = eval { file_get_contents("$path/cgroup.procs") } // '';
+    my @pids = map { /^(\d+)$/ ? $1 : () } split(/\n/, $procs);
+    kill($name, @pids) if @pids;
+
+    return;
+}
+
 # Remove a resource scope once its last process is gone, as systemd does with
 # a transient scope by itself; here nothing else does (wait_for_unit_removed
 # only on the next start of the same scope). Only this backend has it, see the

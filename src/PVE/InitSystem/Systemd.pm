@@ -179,6 +179,22 @@ sub stop_scope {
     run(['systemctl', 'stop', $unit], outfunc => sub { }, errfunc => sub { });
 }
 
+# Send a signal (a name like 'KILL' or 'SIGKILL') to all processes of a scope
+# at once, like 'systemctl kill --kill-whom=all'. Doesn't wait for them to
+# exit, see wait_for_unit_removed. Dies if systemctl fails.
+sub kill_scope {
+    my ($unit, $signal) = @_;
+
+    die "invalid signal '$signal'\n" if $signal !~ m/^(?:SIG)?([A-Z][A-Z0-9+-]*|\d+)$/;
+
+    run(
+        ['systemctl', 'kill', '--kill-whom=all', "--signal=$signal", $unit],
+        outfunc => sub { },
+        errfunc => sub { },
+        timeout => 10,
+    );
+}
+
 # Reset the 'failed' state of units, e.g. so that a failed scope or a unit
 # PartOf= it doesn't block starting a new scope with the same name. Errors,
 # e.g. for units not loaded, are ignored.

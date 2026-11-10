@@ -578,6 +578,13 @@ SKIP: {
     PVE::InitSystem::Systemd::stop_scope('100.scope', timeout => 5, kill => 0);
     is_deeply($calls->[-1], ['systemctl', 'stop', '100.scope'], 'systemd stop_scope: unit\'s own kill settings apply');
 
+    PVE::InitSystem::Systemd::kill_scope('100.scope', 'KILL');
+    is_deeply(
+        $calls->[-1],
+        ['systemctl', 'kill', '--kill-whom=all', '--signal=KILL', '100.scope'],
+        'systemd kill_scope: all processes of the scope',
+    );
+
     @$calls = ();
     PVE::InitSystem::Systemd::reset_failed('pve-dbus-vmstate@100.service', '100.scope');
     is_deeply(
